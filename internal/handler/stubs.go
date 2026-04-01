@@ -141,6 +141,43 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	ok(c, member)
 }
 
+// AdjustMemberBalance แอดมินเติม/หักเครดิตสมาชิกตรง
+// PUT /api/v1/members/:id/balance
+// Body: { "amount": 500, "note": "เติมเครดิตโดยแอดมิน" }
+// amount เป็นบวก = เติม, ลบ = หัก
+func (h *Handler) AdjustMemberBalance(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var req struct {
+		Amount float64 `json:"amount" binding:"required"`
+		Note   string  `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+
+	var member model.Member
+	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
+
+	// เช็คว่าหักแล้วไม่ติดลบ
+	if req.Amount < 0 && member.Balance+req.Amount < 0 {
+		fail(c, 400, "ยอดเงินไม่เพียงพอ"); return
+	}
+
+	tx := h.DB.Begin()
+	now := time.Now()
+
+	// อัพเดทยอดเงิน
+	tx.Model(&model.Member{}).Where("id = ?", id).Update("balance", h.DB.Raw("balance + ?", req.Amount))
+
+	// สร้าง transaction record
+	txType := "admin_credit"
+	if req.Amount < 0 { txType = "admin_debit" }
+	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		VALUES (?, ?, ?, ?, ?, 'admin_adjust', ?, ?)`,
+		id, txType, req.Amount, member.Balance, member.Balance+req.Amount, req.Note, now)
+
+	tx.Commit()
+	ok(c, gin.H{"member_id": id, "amount": req.Amount, "balance_before": member.Balance, "balance_after": member.Balance + req.Amount})
+}
+
 func (h *Handler) UpdateMemberStatus(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct { Status string `json:"status" binding:"required"` }
@@ -557,4 +594,150 @@ func (h *Handler) GetAffiliateReport(c *gin.Context) {
 		Scan(&report)
 
 	ok(c, report)
+}
+
+// =============================================================================
+// Deposit Requests — อนุมัติ/ปฏิเสธคำขอฝากเงิน
+// =============================================================================
+
+func (h *Handler) ListDepositRequests(c *gin.Context) {
+	page, perPage := pageParams(c)
+	status := c.DefaultQuery("status", "")
+
+	type DepositRow struct {
+		ID        int64   `json:"id"`
+		MemberID  int64   `json:"member_id"`
+		Username  string  `json:"username"`
+		Amount    float64 `json:"amount"`
+		Status    string  `json:"status"`
+		CreatedAt string  `json:"created_at"`
+	}
+
+	var rows []DepositRow
+	var total int64
+
+	query := h.DB.Table("deposit_requests d").
+		Select("d.id, d.member_id, m.username, d.amount, d.status, d.created_at").
+		Joins("LEFT JOIN members m ON m.id = d.member_id")
+	if status != "" {
+		query = query.Where("d.status = ?", status)
+	}
+	query.Count(&total)
+	query.Order("d.created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Scan(&rows)
+
+	paginated(c, rows, total, page, perPage)
+}
+
+func (h *Handler) ApproveDeposit(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	// ดึง request
+	var amount float64
+	var memberID int64
+	var reqStatus string
+	h.DB.Table("deposit_requests").Select("amount, member_id, status").Where("id = ?", id).Row().Scan(&amount, &memberID, &reqStatus)
+	if reqStatus != "pending" {
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ"); return
+	}
+
+	tx := h.DB.Begin()
+
+	// อัพเดท status → approved
+	now := time.Now()
+	tx.Exec("UPDATE deposit_requests SET status = 'approved', approved_at = ? WHERE id = ?", now, id)
+
+	// เพิ่มเงินให้สมาชิก
+	var balanceBefore float64
+	h.DB.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceBefore)
+	tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", amount, memberID)
+
+	// สร้าง transaction record
+	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		VALUES (?, 'deposit', ?, ?, ?, 'deposit_request', ?, ?)`,
+		memberID, amount, balanceBefore, balanceBefore+amount, "อนุมัติโดยแอดมิน", now)
+
+	tx.Commit()
+	ok(c, gin.H{"id": id, "status": "approved", "amount": amount, "member_id": memberID})
+}
+
+func (h *Handler) RejectDeposit(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	h.DB.Exec("UPDATE deposit_requests SET status = 'rejected', approved_at = ? WHERE id = ? AND status = 'pending'", time.Now(), id)
+	ok(c, gin.H{"id": id, "status": "rejected"})
+}
+
+// =============================================================================
+// Withdraw Requests — อนุมัติ/ปฏิเสธคำขอถอนเงิน
+// =============================================================================
+
+func (h *Handler) ListWithdrawRequests(c *gin.Context) {
+	page, perPage := pageParams(c)
+	status := c.DefaultQuery("status", "")
+
+	type WithdrawRow struct {
+		ID                int64   `json:"id"`
+		MemberID          int64   `json:"member_id"`
+		Username          string  `json:"username"`
+		Amount            float64 `json:"amount"`
+		BankCode          string  `json:"bank_code"`
+		BankAccountNumber string  `json:"bank_account_number"`
+		BankAccountName   string  `json:"bank_account_name"`
+		Status            string  `json:"status"`
+		CreatedAt         string  `json:"created_at"`
+	}
+
+	var rows []WithdrawRow
+	var total int64
+
+	query := h.DB.Table("withdraw_requests w").
+		Select("w.id, w.member_id, m.username, w.amount, w.bank_code, w.bank_account_number, w.bank_account_name, w.status, w.created_at").
+		Joins("LEFT JOIN members m ON m.id = w.member_id")
+	if status != "" {
+		query = query.Where("w.status = ?", status)
+	}
+	query.Count(&total)
+	query.Order("w.created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Scan(&rows)
+
+	paginated(c, rows, total, page, perPage)
+}
+
+func (h *Handler) ApproveWithdraw(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	var amount float64
+	var memberID int64
+	var reqStatus string
+	h.DB.Table("withdraw_requests").Select("amount, member_id, status").Where("id = ?", id).Row().Scan(&amount, &memberID, &reqStatus)
+	if reqStatus != "pending" {
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ"); return
+	}
+
+	// เช็คยอดเงินพอ
+	var balance float64
+	h.DB.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
+	if balance < amount {
+		fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอ"); return
+	}
+
+	tx := h.DB.Begin()
+
+	now := time.Now()
+	tx.Exec("UPDATE withdraw_requests SET status = 'approved', approved_at = ? WHERE id = ?", now, id)
+
+	// หักเงินสมาชิก
+	tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ?", amount, memberID)
+
+	// สร้าง transaction record
+	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		VALUES (?, 'withdraw', ?, ?, ?, 'withdraw_request', ?, ?)`,
+		memberID, -amount, balance, balance-amount, "อนุมัติโดยแอดมิน", now)
+
+	tx.Commit()
+	ok(c, gin.H{"id": id, "status": "approved", "amount": amount, "member_id": memberID})
+}
+
+func (h *Handler) RejectWithdraw(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	h.DB.Exec("UPDATE withdraw_requests SET status = 'rejected', approved_at = ? WHERE id = ? AND status = 'pending'", time.Now(), id)
+	ok(c, gin.H{"id": id, "status": "rejected"})
 }

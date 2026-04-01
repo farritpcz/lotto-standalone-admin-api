@@ -28,10 +28,13 @@ type Member struct {
 	Balance      float64   `gorm:"type:decimal(15,2);not null;default:0" json:"balance"`
 	Status       string    `gorm:"size:20;not null;default:active" json:"status"`
 	// ReferredBy — ID ของสมาชิกที่แนะนำมา (affiliate referrer)
-	// ⭐ ใช้โดย commission_job เพื่อหา referrer ของ bettor
-	ReferredBy   *int64    `gorm:"index" json:"referred_by,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ReferredBy        *int64    `gorm:"index" json:"referred_by,omitempty"`
+	// ข้อมูลธนาคาร (กรอกตอนสมัคร)
+	BankCode          string    `gorm:"size:20" json:"bank_code"`
+	BankAccountNumber string    `gorm:"size:20" json:"bank_account_number"`
+	BankAccountName   string    `gorm:"size:100" json:"bank_account_name"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type LotteryType struct {

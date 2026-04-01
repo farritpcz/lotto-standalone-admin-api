@@ -85,6 +85,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.GET("/members/:id", h.GetMember)
 			protected.PUT("/members/:id", h.UpdateMember)
 			protected.PUT("/members/:id/status", h.UpdateMemberStatus)
+			protected.PUT("/members/:id/balance", h.AdjustMemberBalance)
 
 			// Lotteries
 			protected.GET("/lotteries", h.ListLotteries)
@@ -124,6 +125,22 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			// Settings
 			protected.GET("/settings", h.GetSettings)
 			protected.PUT("/settings", h.UpdateSettings)
+
+			// Deposit Requests — อนุมัติ/ปฏิเสธคำขอฝากเงิน
+			deposits := protected.Group("/deposits")
+			{
+				deposits.GET("", h.ListDepositRequests)
+				deposits.PUT("/:id/approve", h.ApproveDeposit)
+				deposits.PUT("/:id/reject", h.RejectDeposit)
+			}
+
+			// Withdraw Requests — อนุมัติ/ปฏิเสธคำขอถอนเงิน
+			withdrawals := protected.Group("/withdrawals")
+			{
+				withdrawals.GET("", h.ListWithdrawRequests)
+				withdrawals.PUT("/:id/approve", h.ApproveWithdraw)
+				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
+			}
 
 			// Affiliate Settings — commission rates + withdrawal conditions
 			affiliate := protected.Group("/affiliate")

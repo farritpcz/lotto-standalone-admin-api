@@ -47,6 +47,19 @@ func main() {
 	// =================================================================
 	r := gin.Default()
 
+	// CORS middleware — ให้ admin-web (#6) เรียก API ได้
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
+		c.Header("Access-Control-Max-Age", "86400")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
+
 	h := handler.NewHandler(cfg.AdminJWTSecret, cfg.AdminJWTExpiryHours)
 	h.DB = db // inject DB ให้ handler ใช้
 	h.SetupRoutes(r)
