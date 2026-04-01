@@ -1,0 +1,132 @@
+// Package handler จัดการ HTTP handlers สำหรับ standalone-admin-api
+//
+// ความสัมพันธ์:
+// - repo #5 (admin API) — จัดการระบบหลังบ้าน
+// - คู่กับ #6 (admin frontend)
+// - share DB กับ #3 (member API)
+//
+// Admin API Routes:
+//
+//	POST   /api/v1/auth/login              → Admin Login
+//
+//	GET    /api/v1/dashboard               → Dashboard stats         [auth]
+//
+//	GET    /api/v1/members                 → List members            [auth]
+//	GET    /api/v1/members/:id             → Get member detail       [auth]
+//	PUT    /api/v1/members/:id             → Update member           [auth]
+//	PUT    /api/v1/members/:id/status      → Suspend/Activate member [auth]
+//
+//	GET    /api/v1/lotteries               → List lottery types      [auth]
+//	POST   /api/v1/lotteries               → Create lottery type     [auth]
+//	PUT    /api/v1/lotteries/:id           → Update lottery type     [auth]
+//
+//	GET    /api/v1/rounds                  → List rounds             [auth]
+//	POST   /api/v1/rounds                  → Create round            [auth]
+//	PUT    /api/v1/rounds/:id/status       → Update round status     [auth]
+//
+//	POST   /api/v1/results/:roundId        → Submit result           [auth]
+//	GET    /api/v1/results                 → List results            [auth]
+//
+//	GET    /api/v1/bans                    → List number bans        [auth]
+//	POST   /api/v1/bans                    → Create ban              [auth]
+//	DELETE /api/v1/bans/:id                → Remove ban              [auth]
+//
+//	GET    /api/v1/rates                   → List pay rates          [auth]
+//	PUT    /api/v1/rates/:id               → Update pay rate         [auth]
+//
+//	GET    /api/v1/bets                    → List all bets           [auth]
+//	GET    /api/v1/transactions            → List all transactions   [auth]
+//
+//	GET    /api/v1/reports/summary          → Summary report         [auth]
+//	GET    /api/v1/reports/profit           → Profit/Loss report     [auth]
+//
+//	GET    /api/v1/settings                → Get settings            [auth]
+//	PUT    /api/v1/settings                → Update settings         [auth]
+package handler
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+// Handler รวม dependencies ทั้งหมด
+type Handler struct {
+	AdminJWTSecret     string
+	AdminJWTExpiryHours int
+}
+
+// NewHandler สร้าง Handler instance
+func NewHandler(adminJWTSecret string, adminJWTExpiryHours int) *Handler {
+	return &Handler{
+		AdminJWTSecret:      adminJWTSecret,
+		AdminJWTExpiryHours: adminJWTExpiryHours,
+	}
+}
+
+// SetupRoutes ลงทะเบียน routes ทั้งหมด
+func (h *Handler) SetupRoutes(r *gin.Engine) {
+	api := r.Group("/api/v1")
+	{
+		// === Public ===
+		api.POST("/auth/login", h.AdminLogin)
+
+		// === Protected (ต้อง Admin JWT) ===
+		// TODO: เพิ่ม admin JWT middleware
+		protected := api.Group("")
+		{
+			// Dashboard
+			protected.GET("/dashboard", h.GetDashboard)
+
+			// Members
+			protected.GET("/members", h.ListMembers)
+			protected.GET("/members/:id", h.GetMember)
+			protected.PUT("/members/:id", h.UpdateMember)
+			protected.PUT("/members/:id/status", h.UpdateMemberStatus)
+
+			// Lotteries
+			protected.GET("/lotteries", h.ListLotteries)
+			protected.POST("/lotteries", h.CreateLottery)
+			protected.PUT("/lotteries/:id", h.UpdateLottery)
+
+			// Rounds
+			protected.GET("/rounds", h.ListRounds)
+			protected.POST("/rounds", h.CreateRound)
+			protected.PUT("/rounds/:id/status", h.UpdateRoundStatus)
+
+			// Results — กรอกผลรางวัล
+			// ⭐ ตรงนี้สำคัญ: เมื่อ admin กรอกผล → trigger job คำนวณแพ้ชนะ + จ่ายเงิน
+			// ใช้ lotto-core: payout.MatchAll() + payout.SummarizeResults()
+			protected.POST("/results/:roundId", h.SubmitResult)
+			protected.GET("/results", h.ListResults)
+
+			// Number Bans — เลขอั้น
+			protected.GET("/bans", h.ListBans)
+			protected.POST("/bans", h.CreateBan)
+			protected.DELETE("/bans/:id", h.DeleteBan)
+
+			// Pay Rates
+			protected.GET("/rates", h.ListRates)
+			protected.PUT("/rates/:id", h.UpdateRate)
+
+			// Bets
+			protected.GET("/bets", h.ListAllBets)
+
+			// Transactions
+			protected.GET("/transactions", h.ListAllTransactions)
+
+			// Reports
+			protected.GET("/reports/summary", h.GetSummaryReport)
+			protected.GET("/reports/profit", h.GetProfitReport)
+
+			// Settings
+			protected.GET("/settings", h.GetSettings)
+			protected.PUT("/settings", h.UpdateSettings)
+		}
+	}
+
+	// Health check
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "lotto-standalone-admin-api"})
+	})
+}
