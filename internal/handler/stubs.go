@@ -248,6 +248,113 @@ func (h *Handler) UpdateRoundStatus(c *gin.Context) {
 // Results — ⭐ กรอกผลรางวัล (trigger payout ผ่าน lotto-core)
 // =============================================================================
 
+// PreviewResult ดูตัวอย่างก่อนกรอกผล — ใครจะถูก จ่ายเท่าไร
+// POST /api/v1/results/:roundId/preview
+// Body: { "top3": "999", "top2": "99", "bottom2": "56" }
+// ⭐ ไม่บันทึกอะไร แค่คำนวณแล้วส่งกลับ
+func (h *Handler) PreviewResult(c *gin.Context) {
+	roundID, _ := strconv.ParseInt(c.Param("roundId"), 10, 64)
+	var req struct {
+		Top3    string `json:"top3" binding:"required"`
+		Top2    string `json:"top2" binding:"required"`
+		Bottom2 string `json:"bottom2" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+
+	// ดึง round
+	var round model.LotteryRound
+	if err := h.DB.First(&round, roundID).Error; err != nil { fail(c, 404, "round not found"); return }
+
+	// ดึง bets ทั้งหมดของรอบ (pending)
+	var bets []model.Bet
+	h.DB.Where("lottery_round_id = ? AND status = ?", roundID, "pending").
+		Preload("BetType").Preload("Member").Find(&bets)
+
+	// คำนวณว่าใครถูก
+	type WinnerInfo struct {
+		BetID    int64   `json:"bet_id"`
+		MemberID int64   `json:"member_id"`
+		Username string  `json:"username"`
+		Number   string  `json:"number"`
+		BetType  string  `json:"bet_type"`
+		Amount   float64 `json:"amount"`
+		Rate     float64 `json:"rate"`
+		Payout   float64 `json:"payout"`
+	}
+
+	var winners []WinnerInfo
+	totalPayout := 0.0
+	totalBets := len(bets)
+	totalAmount := 0.0
+
+	for _, bet := range bets {
+		totalAmount += bet.Amount
+		betTypeCode := ""
+		betTypeName := ""
+		if bet.BetType != nil { betTypeCode = bet.BetType.Code; betTypeName = bet.BetType.Name }
+
+		isWin := false
+		switch betTypeCode {
+		case "3TOP":
+			isWin = bet.Number == req.Top3
+		case "3TOD":
+			// โต๊ด: เลขตรงกันทุกตัว (ไม่สนลำดับ)
+			isWin = sortString(bet.Number) == sortString(req.Top3)
+		case "2TOP":
+			isWin = bet.Number == req.Top2
+		case "2BOTTOM":
+			isWin = bet.Number == req.Bottom2
+		case "RUN_TOP":
+			isWin = containsDigit(req.Top3, bet.Number) || containsDigit(req.Top2, bet.Number)
+		case "RUN_BOT":
+			isWin = containsDigit(req.Bottom2, bet.Number)
+		}
+
+		if isWin {
+			payout := bet.Amount * bet.Rate
+			username := ""
+			if bet.Member != nil { username = bet.Member.Username }
+			winners = append(winners, WinnerInfo{
+				BetID: bet.ID, MemberID: bet.MemberID, Username: username,
+				Number: bet.Number, BetType: betTypeName,
+				Amount: bet.Amount, Rate: bet.Rate, Payout: payout,
+			})
+			totalPayout += payout
+		}
+	}
+
+	ok(c, gin.H{
+		"round_id":     roundID,
+		"round_number": round.RoundNumber,
+		"result":       gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2},
+		"total_bets":   totalBets,
+		"total_amount":  totalAmount,
+		"winners":      winners,
+		"winner_count": len(winners),
+		"total_payout": totalPayout,
+		"profit":       totalAmount - totalPayout,
+	})
+}
+
+// helper: sort string chars
+func sortString(s string) string {
+	r := []byte(s)
+	for i := 0; i < len(r); i++ {
+		for j := i + 1; j < len(r); j++ {
+			if r[i] > r[j] { r[i], r[j] = r[j], r[i] }
+		}
+	}
+	return string(r)
+}
+
+// helper: check if number contains digit
+func containsDigit(result string, digit string) bool {
+	for _, c := range result {
+		if string(c) == digit { return true }
+	}
+	return false
+}
+
 // SubmitResult กรอกผลรางวัล
 // POST /api/v1/results/:roundId
 // Body: { "top3": "847", "top2": "47", "bottom2": "56" }

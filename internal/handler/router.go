@@ -100,6 +100,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			// Results — กรอกผลรางวัล
 			// ⭐ ตรงนี้สำคัญ: เมื่อ admin กรอกผล → trigger job คำนวณแพ้ชนะ + จ่ายเงิน
 			// ใช้ lotto-core: payout.MatchAll() + payout.SummarizeResults()
+			protected.POST("/results/:roundId/preview", h.PreviewResult)
 			protected.POST("/results/:roundId", h.SubmitResult)
 			protected.GET("/results", h.ListResults)
 
