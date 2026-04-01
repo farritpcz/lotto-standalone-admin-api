@@ -124,6 +124,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			// Settings
 			protected.GET("/settings", h.GetSettings)
 			protected.PUT("/settings", h.UpdateSettings)
+
+			// Affiliate Settings — commission rates + withdrawal conditions
+			affiliate := protected.Group("/affiliate")
+			{
+				affiliate.GET("/settings", h.GetAffiliateSettings)
+				affiliate.POST("/settings", h.UpsertAffiliateSetting)
+				affiliate.DELETE("/settings/:id", h.DeleteAffiliateSetting)
+				affiliate.GET("/report", h.GetAffiliateReport)
+			}
 		}
 	}
 

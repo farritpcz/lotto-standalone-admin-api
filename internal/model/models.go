@@ -27,6 +27,9 @@ type Member struct {
 	Email        string    `gorm:"size:100" json:"email"`
 	Balance      float64   `gorm:"type:decimal(15,2);not null;default:0" json:"balance"`
 	Status       string    `gorm:"size:20;not null;default:active" json:"status"`
+	// ReferredBy — ID ของสมาชิกที่แนะนำมา (affiliate referrer)
+	// ⭐ ใช้โดย commission_job เพื่อหา referrer ของ bettor
+	ReferredBy   *int64    `gorm:"index" json:"referred_by,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -136,3 +139,41 @@ type Setting struct {
 	Description string    `gorm:"type:text" json:"description"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+// AffiliateSettings การตั้งค่าค่าคอมมิชชั่น (agent เป็นคนตั้ง)
+// share DB กับ member-api (#3) — ตาราง affiliate_settings
+// lottery_type_id = nil → default rate ใช้กับทุกประเภทหวย
+type AffiliateSettings struct {
+	ID             int64      `gorm:"primaryKey" json:"id"`
+	AgentID        int64      `gorm:"not null;default:1;index" json:"agent_id"`
+	LotteryTypeID  *int64     `gorm:"index" json:"lottery_type_id,omitempty"`
+	CommissionRate float64    `gorm:"type:decimal(5,2);not null;default:0" json:"commission_rate"`
+	WithdrawalMin  float64    `gorm:"type:decimal(15,2);not null;default:1" json:"withdrawal_min"`
+	WithdrawalNote string     `gorm:"type:text" json:"withdrawal_note"`
+	Status         string     `gorm:"size:20;not null;default:active" json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	LotteryType    *LotteryType `gorm:"foreignKey:LotteryTypeID" json:"lottery_type,omitempty"`
+}
+
+func (AffiliateSettings) TableName() string { return "affiliate_settings" }
+
+// ReferralCommission บันทึกค่าคอมมิชชั่นที่คำนวณแล้ว
+// สร้างโดย commission_job หลัง SubmitResult ทุกครั้ง
+// share DB กับ member-api (#3) — ตาราง referral_commissions
+type ReferralCommission struct {
+	ID               int64      `gorm:"primaryKey" json:"id"`
+	ReferrerID       int64      `gorm:"not null;index" json:"referrer_id"`        // สมาชิกที่ได้ค่าคอม
+	ReferredID       int64      `gorm:"not null;index" json:"referred_id"`         // สมาชิกที่ถูกแนะนำมา
+	AgentID          int64      `gorm:"not null;default:1" json:"agent_id"`
+	BetID            *int64     `gorm:"index" json:"bet_id"`                      // bet ที่ generate commission นี้
+	RoundID          *int64     `gorm:"index" json:"round_id"`                    // round ที่ settle
+	BetAmount        float64    `gorm:"type:decimal(15,2);not null" json:"bet_amount"`
+	CommissionRate   float64    `gorm:"type:decimal(5,2);not null" json:"commission_rate"`
+	CommissionAmount float64    `gorm:"type:decimal(15,2);not null" json:"commission_amount"`
+	Status           string     `gorm:"size:20;not null;default:pending" json:"status"` // pending/paid
+	PaidAt           *time.Time `json:"paid_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+}
+
+func (ReferralCommission) TableName() string { return "referral_commissions" }

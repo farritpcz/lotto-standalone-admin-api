@@ -1,0 +1,185 @@
+// Package job — commission_job.go
+// คำนวณและ insert ค่าคอมมิชชั่นหลัง bet round settle เสร็จ
+//
+// ⭐ ความสัมพันธ์:
+//   - เรียกจาก: admin-api SubmitResult() ใน handler/stubs.go
+//   - อ่าน table: bets, members, affiliate_settings (share DB กับ member-api #3)
+//   - เขียน table: referral_commissions
+//
+// Flow:
+//  1. ดึง round → รู้ lottery_type_id
+//  2. ดึง affiliate_settings ของ agent → หา commission rate
+//     (lottery-specific rate override default rate)
+//  3. ดึง bets ที่ settled แล้ว (won/lost) ของ round
+//  4. cache map: bettor_id → referrer_id (ดึงจาก members.referred_by)
+//  5. Loop bets → คำนวณ commission → insert referral_commissions
+//     (dedup check: ถ้า bet_id ซ้ำ ข้าม)
+//
+// เรียกใน goroutine ใหม่ → ไม่ block response ของ SubmitResult
+package job
+
+import (
+	"log"
+	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
+)
+
+// CalculateCommissions คำนวณค่าคอมมิชชั่นสำหรับ round ที่ settle แล้ว
+//
+// Parameters:
+//   - db: *gorm.DB (แยกจาก main DB ไม่ใช้ transaction — round settle เสร็จแล้ว)
+//   - roundID: ID ของ round ที่ submit result แล้ว
+//   - agentID: agent ที่รับผิดชอบ (standalone = 1)
+//
+// หมายเหตุ: ฟังก์ชันนี้ run ใน goroutine แยก ไม่ panic เมื่อ error
+func CalculateCommissions(db *gorm.DB, roundID, agentID int64) {
+	// -----------------------------------------------------------------------
+	// Step 1: ดึง round เพื่อรู้ lottery_type_id
+	// -----------------------------------------------------------------------
+	var round model.LotteryRound
+	if err := db.First(&round, roundID).Error; err != nil {
+		log.Printf("[commission_job] round %d not found: %v", roundID, err)
+		return
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 2: ดึง affiliate_settings ของ agent → หา commission rate
+	//
+	// ลำดับความสำคัญ:
+	//   1. lottery_type_id matching → rate เฉพาะประเภทหวยนี้
+	//   2. lottery_type_id = NULL → default rate ทุกประเภท
+	// -----------------------------------------------------------------------
+	var settings []model.AffiliateSettings
+	db.Where("agent_id = ? AND status = ?", agentID, "active").Find(&settings)
+
+	defaultRate := 0.0
+	specificRate := 0.0
+	hasSpecific := false
+
+	for _, s := range settings {
+		if s.LotteryTypeID == nil {
+			// default rate — ใช้เมื่อไม่มี rate เฉพาะ
+			defaultRate = s.CommissionRate
+		} else if *s.LotteryTypeID == round.LotteryTypeID {
+			// rate เฉพาะประเภทหวยนี้ → override default
+			specificRate = s.CommissionRate
+			hasSpecific = true
+		}
+	}
+
+	commissionRate := defaultRate
+	if hasSpecific {
+		commissionRate = specificRate
+	}
+
+	// ถ้า rate = 0 → ไม่มีค่าคอม ข้ามเลย
+	if commissionRate <= 0 {
+		log.Printf("[commission_job] round %d: commission rate = 0, skip", roundID)
+		return
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 3: ดึง bets ที่ settled แล้ว (won/lost) ของ round นี้
+	// -----------------------------------------------------------------------
+	var bets []model.Bet
+	db.Where("lottery_round_id = ? AND status IN ?", roundID, []string{"won", "lost"}).Find(&bets)
+
+	if len(bets) == 0 {
+		log.Printf("[commission_job] round %d: no settled bets found", roundID)
+		return
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 4: สร้าง cache map: bettor_id → referrer_id
+	// ดึงเฉพาะ members ที่มี referred_by ไม่ query ทีละคน
+	// -----------------------------------------------------------------------
+	memberIDs := make([]int64, 0, len(bets))
+	seenMember := map[int64]bool{}
+	for _, b := range bets {
+		if !seenMember[b.MemberID] {
+			memberIDs = append(memberIDs, b.MemberID)
+			seenMember[b.MemberID] = true
+		}
+	}
+
+	// ดึงเฉพาะ members ที่มี referred_by ไม่ใช่ NULL
+	var members []model.Member
+	db.Select("id, referred_by").
+		Where("id IN ? AND referred_by IS NOT NULL", memberIDs).
+		Find(&members)
+
+	// map: bettor_id → referrer_id
+	referrerMap := map[int64]int64{}
+	for _, m := range members {
+		if m.ReferredBy != nil {
+			referrerMap[m.ID] = *m.ReferredBy
+		}
+	}
+
+	// ถ้าไม่มีใครมี referrer → ข้าม
+	if len(referrerMap) == 0 {
+		log.Printf("[commission_job] round %d: no members with referrer", roundID)
+		return
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 5: Loop bets → คำนวณ commission → insert referral_commissions
+	// -----------------------------------------------------------------------
+	now := time.Now()
+	inserted := 0
+	skipped := 0
+
+	for _, bet := range bets {
+		// หา referrer ของ bettor นี้
+		referrerID, hasReferrer := referrerMap[bet.MemberID]
+		if !hasReferrer {
+			continue
+		}
+
+		// คำนวณ commission
+		// commission_rate เป็น % เช่น 0.5 = 0.5% ของ bet amount
+		commissionAmount := bet.Amount * commissionRate / 100
+		if commissionAmount <= 0 {
+			continue
+		}
+
+		// ⭐ Dedup check: ถ้า bet_id + referrer_id ซ้ำ แสดงว่า insert ไปแล้ว
+		// ป้องกัน commission ซ้ำถ้า SubmitResult ถูกเรียกซ้ำ (ไม่ควรเกิด แต่ป้องกันไว้)
+		var existing int64
+		db.Model(&model.ReferralCommission{}).
+			Where("bet_id = ? AND referrer_id = ?", bet.ID, referrerID).
+			Count(&existing)
+		if existing > 0 {
+			skipped++
+			continue
+		}
+
+		// Insert commission record
+		comm := model.ReferralCommission{
+			ReferrerID:       referrerID,
+			ReferredID:       bet.MemberID,
+			AgentID:          agentID,
+			BetID:            &bet.ID,
+			RoundID:          &roundID,
+			BetAmount:        bet.Amount,
+			CommissionRate:   commissionRate,
+			CommissionAmount: commissionAmount,
+			Status:           "pending", // member ต้องกด "ถอน" เอง → เปลี่ยนเป็น paid
+			CreatedAt:        now,
+		}
+
+		if err := db.Create(&comm).Error; err != nil {
+			log.Printf("[commission_job] failed to insert commission for bet %d: %v", bet.ID, err)
+			continue
+		}
+		inserted++
+	}
+
+	log.Printf(
+		"[commission_job] round %d done: rate=%.2f%%, inserted=%d, skipped=%d",
+		roundID, commissionRate, inserted, skipped,
+	)
+}

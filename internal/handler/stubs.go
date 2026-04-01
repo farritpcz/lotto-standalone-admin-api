@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
 )
 
@@ -295,6 +296,11 @@ func (h *Handler) SubmitResult(c *gin.Context) {
 		settledCount++
 	}
 
+	// ⭐ Step 7: คำนวณ commission ให้ referrers ของ bettors
+	// Run ใน goroutine แยก → ไม่ block response
+	// ดู internal/job/commission_job.go สำหรับ logic ทั้งหมด
+	go job.CalculateCommissions(h.DB, roundID, 1 /* agentID = 1 สำหรับ standalone */)
+
 	ok(c, gin.H{
 		"round_id":      roundID,
 		"result":        gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2},
@@ -463,4 +469,92 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.DB.Model(&model.Setting{}).Where("`key` = ?", key).Update("value", value)
 	}
 	ok(c, gin.H{"updated": req})
+}
+
+// =============================================================================
+// Affiliate Settings — agent ตั้งค่า commission rate ต่อประเภทหวย + withdrawal conditions
+//
+// GET  /api/v1/admin/affiliate/settings → ดูค่าทั้งหมด (รวม default + per-lottery)
+// POST /api/v1/admin/affiliate/settings → upsert: สร้างหรืออัพเดท
+// GET  /api/v1/admin/affiliate/report   → รายงาน commission ทั้งหมด
+// =============================================================================
+
+func (h *Handler) GetAffiliateSettings(c *gin.Context) {
+	var settings []model.AffiliateSettings
+	h.DB.Preload("LotteryType").Order("lottery_type_id ASC").Find(&settings)
+	ok(c, settings)
+}
+
+// UpsertAffiliateSetting สร้างหรืออัพเดท setting
+// Body: { "lottery_type_id": null|1, "commission_rate": 0.8, "withdrawal_min": 10, "withdrawal_note": "..." }
+func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
+	var req struct {
+		LotteryTypeID  *int64  `json:"lottery_type_id"`  // nil = default
+		CommissionRate float64 `json:"commission_rate" binding:"required,min=0,max=100"`
+		WithdrawalMin  float64 `json:"withdrawal_min"`
+		WithdrawalNote string  `json:"withdrawal_note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+
+	// หา agent_id จาก JWT (ใช้ default 1 สำหรับ standalone)
+	agentID := int64(1)
+
+	var existing model.AffiliateSettings
+	query := h.DB.Where("agent_id = ?", agentID)
+	if req.LotteryTypeID == nil {
+		query = query.Where("lottery_type_id IS NULL")
+	} else {
+		query = query.Where("lottery_type_id = ?", *req.LotteryTypeID)
+	}
+
+	if err := query.First(&existing).Error; err != nil {
+		// สร้างใหม่
+		setting := model.AffiliateSettings{
+			AgentID:        agentID,
+			LotteryTypeID:  req.LotteryTypeID,
+			CommissionRate: req.CommissionRate,
+			WithdrawalMin:  req.WithdrawalMin,
+			WithdrawalNote: req.WithdrawalNote,
+			Status:         "active",
+		}
+		if err := h.DB.Create(&setting).Error; err != nil { fail(c, 500, "failed to create"); return }
+		ok(c, setting)
+		return
+	}
+
+	// อัพเดท
+	updates := map[string]interface{}{
+		"commission_rate": req.CommissionRate,
+		"withdrawal_min":  req.WithdrawalMin,
+		"withdrawal_note": req.WithdrawalNote,
+	}
+	h.DB.Model(&existing).Updates(updates)
+	h.DB.Preload("LotteryType").First(&existing, existing.ID)
+	ok(c, existing)
+}
+
+func (h *Handler) DeleteAffiliateSetting(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	h.DB.Model(&model.AffiliateSettings{}).Where("id = ?", id).Update("status", "inactive")
+	ok(c, gin.H{"id": id, "status": "inactive"})
+}
+
+// GetAffiliateReport รายงาน commission ทั้งหมด (สำหรับ agent ดู)
+func (h *Handler) GetAffiliateReport(c *gin.Context) {
+	type CommSummary struct {
+		MemberID         int64   `json:"member_id"`
+		Username         string  `json:"username"`
+		TotalReferred    int64   `json:"total_referred"`
+		TotalCommission  float64 `json:"total_commission"`
+		PendingComm      float64 `json:"pending_commission"`
+	}
+	var report []CommSummary
+	h.DB.Table("referral_commissions rc").
+		Select("rc.referrer_id as member_id, m.username, COUNT(DISTINCT rc.referred_id) as total_referred, COALESCE(SUM(rc.commission_amount), 0) as total_commission, COALESCE(SUM(CASE WHEN rc.status='pending' THEN rc.commission_amount ELSE 0 END), 0) as pending_commission").
+		Joins("LEFT JOIN members m ON m.id = rc.referrer_id").
+		Group("rc.referrer_id, m.username").
+		Order("total_commission DESC").
+		Scan(&report)
+
+	ok(c, report)
 }
