@@ -48,12 +48,14 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // Handler รวม dependencies ทั้งหมด
 type Handler struct {
-	AdminJWTSecret     string
+	AdminJWTSecret      string
 	AdminJWTExpiryHours int
+	DB                  *gorm.DB // inject จาก main.go — ⭐ share DB กับ member-api (#3)
 }
 
 // NewHandler สร้าง Handler instance
