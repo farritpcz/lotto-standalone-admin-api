@@ -265,10 +265,17 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 	var round model.LotteryRound
 	if err := h.DB.First(&round, roundID).Error; err != nil { fail(c, 404, "round not found"); return }
 
-	// ดึง bets ทั้งหมดของรอบ (pending)
+	// ดึง bets ทั้งหมดของรอบ (pending หรือ won/lost ถ้าออกผลไปแล้ว)
 	var bets []model.Bet
-	h.DB.Where("lottery_round_id = ? AND status = ?", roundID, "pending").
-		Preload("BetType").Preload("Member").Find(&bets)
+	if round.Status == "resulted" {
+		// รอบ resulted แล้ว → ดึงทุก status
+		h.DB.Where("lottery_round_id = ?", roundID).
+			Preload("BetType").Preload("Member").Find(&bets)
+	} else {
+		// รอบยังไม่ resulted → ดึงเฉพาะ pending
+		h.DB.Where("lottery_round_id = ? AND status = ?", roundID, "pending").
+			Preload("BetType").Preload("Member").Find(&bets)
+	}
 
 	// คำนวณว่าใครถูก
 	type WinnerInfo struct {
