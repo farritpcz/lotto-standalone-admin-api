@@ -46,6 +46,13 @@ type Config struct {
 	RKAutoWebhookIPs    string // comma-separated IP whitelist (ว่าง = ไม่เช็ค)
 	RKAutoEncryptionKey string // AES-256 key สำหรับเข้ารหัส bank credentials (32 chars)
 	WebhookBaseURL      string // URL สาธารณะของเรา สำหรับ callback
+
+	// Cloudflare R2 — image storage
+	R2AccountID  string
+	R2AccessKey  string
+	R2SecretKey  string
+	R2Bucket     string
+	R2PublicURL  string // เช่น https://pub-xxx.r2.dev หรือ custom domain
 }
 
 // Load โหลด config จาก environment variables
@@ -77,6 +84,12 @@ func Load() *Config {
 		RKAutoWebhookIPs:    getEnv("RKAUTO_WEBHOOK_IPS", "45.32.117.90"),
 		RKAutoEncryptionKey: getEnv("RKAUTO_ENCRYPTION_KEY", "default-key-change-in-prod!!!!"),
 		WebhookBaseURL:      getEnv("WEBHOOK_BASE_URL", ""),
+
+		R2AccountID: getEnv("R2_ACCOUNT_ID", ""),
+		R2AccessKey: getEnv("R2_ACCESS_KEY", ""),
+		R2SecretKey: getEnv("R2_SECRET_KEY", ""),
+		R2Bucket:    getEnv("R2_BUCKET", "lotto-images"),
+		R2PublicURL: getEnv("R2_PUBLIC_URL", ""),
 	}
 }
 

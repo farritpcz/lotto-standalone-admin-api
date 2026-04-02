@@ -25,6 +25,7 @@ import (
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/handler"
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/rkauto"
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/storage"
 )
 
 func main() {
@@ -79,6 +80,20 @@ func main() {
 	h.DB = db
 	h.Redis = rdb
 	h.EncryptionKey = cfg.RKAutoEncryptionKey
+
+	// Cloudflare R2 storage (optional — fallback to local)
+	if cfg.R2AccountID != "" && cfg.R2AccessKey != "" {
+		r2Client, r2Err := storage.NewR2Client(cfg.R2AccountID, cfg.R2AccessKey, cfg.R2SecretKey, cfg.R2Bucket, cfg.R2PublicURL)
+		if r2Err != nil {
+			log.Printf("⚠️ R2 init failed: %v — using local storage", r2Err)
+		} else {
+			h.R2 = r2Client
+			log.Printf("✅ Cloudflare R2 connected: bucket=%s", cfg.R2Bucket)
+		}
+	} else {
+		log.Println("ℹ️ R2 not configured — using local storage (set R2_ACCOUNT_ID + R2_ACCESS_KEY)")
+	}
+
 	h.SetupRoutes(r)
 
 	// ⚠️ RKAUTO Webhook Routes (PUBLIC — signature verified)

@@ -62,6 +62,7 @@ type Handler struct {
 	Redis               *redis.Client    // Redis สำหรับ cache dashboard stats
 	RKAutoClient        interface{}      // *rkauto.Client (nil = disabled)
 	EncryptionKey       string           // AES-256 key สำหรับ encrypt bank credentials
+	R2                  interface{}      // *storage.R2Client (nil = local fallback)
 }
 
 // NewHandler สร้าง Handler instance

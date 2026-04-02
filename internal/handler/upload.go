@@ -1,14 +1,12 @@
 // Package handler — upload.go
-// อัพโหลดรูปภาพ + serve static files
+// อัพโหลดรูปภาพ → Cloudflare R2 (primary) หรือ local disk (fallback)
 //
-// POST /api/v1/upload — รับไฟล์ multipart/form-data → บันทึก → return URL
-// GET  /uploads/:filename — serve static file
+// POST /api/v1/upload — multipart/form-data
 //
 // ⚠️ SECURITY:
 // - จำกัดขนาด 5MB
 // - รับเฉพาะ jpg, jpeg, png, gif, svg, webp
-// - rename ไฟล์เป็น UUID ป้องกัน path traversal
-// - เก็บใน ./uploads/ directory
+// - rename UUID ป้องกัน path traversal
 package handler
 
 import (
@@ -21,6 +19,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/storage"
 )
 
 const (
@@ -33,52 +33,81 @@ var allowedExts = map[string]bool{
 	".gif": true, ".svg": true, ".webp": true,
 }
 
-// UploadFile อัพโหลดไฟล์รูปภาพ
+// UploadFile อัพโหลดรูปภาพ
 // POST /api/v1/upload
-// Content-Type: multipart/form-data
 // Field: file (required), folder (optional: "lottery", "banner", "avatar")
+//
+// ถ้า R2 configured → อัพไป R2 → return R2 public URL
+// ถ้า R2 ไม่มี → เก็บ local → return /uploads/... URL
 func (h *Handler) UploadFile(c *gin.Context) {
-	// จำกัดขนาด
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
 
-	file, err := c.FormFile("file")
+	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		fail(c, 400, "กรุณาเลือกไฟล์ (max 5MB)")
 		return
 	}
+	defer file.Close()
 
-	// เช็คนามสกุล
-	ext := strings.ToLower(filepath.Ext(file.Filename))
+	ext := strings.ToLower(filepath.Ext(header.Filename))
 	if !allowedExts[ext] {
 		fail(c, 400, "รองรับเฉพาะ jpg, png, gif, svg, webp")
 		return
 	}
 
-	// สร้าง folder ถ้าไม่มี
 	folder := c.DefaultPostForm("folder", "general")
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	// ── ลอง R2 ก่อน ──
+	if r2, ok := h.R2.(*storage.R2Client); ok && r2 != nil && r2.IsConfigured() {
+		publicURL, err := r2.Upload(folder, header.Filename, contentType, file)
+		if err != nil {
+			fail(c, 500, "R2 upload failed: "+err.Error())
+			return
+		}
+
+		ok2(c, gin.H{
+			"url":      publicURL,
+			"storage":  "r2",
+			"filename": filepath.Base(publicURL),
+			"folder":   folder,
+			"size":     header.Size,
+			"type":     contentType,
+		})
+		return
+	}
+
+	// ── Fallback: Local disk ──
 	dir := filepath.Join(uploadDir, folder)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fail(c, 500, "สร้าง directory ไม่สำเร็จ")
 		return
 	}
 
-	// rename เป็น UUID ป้องกัน path traversal
 	newName := fmt.Sprintf("%s_%d%s", uuid.New().String()[:12], time.Now().Unix(), ext)
 	savePath := filepath.Join(dir, newName)
 
-	if err := c.SaveUploadedFile(file, savePath); err != nil {
+	if err := c.SaveUploadedFile(header, savePath); err != nil {
 		fail(c, 500, "บันทึกไฟล์ไม่สำเร็จ")
 		return
 	}
 
-	// URL สำหรับเข้าถึงไฟล์
 	fileURL := fmt.Sprintf("/uploads/%s/%s", folder, newName)
 
-	ok(c, gin.H{
+	ok2(c, gin.H{
 		"url":      fileURL,
+		"storage":  "local",
 		"filename": newName,
 		"folder":   folder,
-		"size":     file.Size,
-		"type":     file.Header.Get("Content-Type"),
+		"size":     header.Size,
+		"type":     contentType,
 	})
+}
+
+// ok2 helper — เหมือน ok แต่ใช้ใน upload (ป้องกัน conflict กับ ok ใน stubs.go)
+func ok2(c *gin.Context, data interface{}) {
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
 }
