@@ -143,6 +143,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
 			}
 
+			// ⭐ Yeekee — monitoring รอบยี่กี real-time
+			yeekee := protected.Group("/yeekee")
+			{
+				yeekee.GET("/rounds", h.ListYeekeeRounds)           // รายการรอบ (paginated + filter)
+				yeekee.GET("/rounds/:id", h.GetYeekeeRoundDetail)   // รอบเดียว + shoots
+				yeekee.GET("/rounds/:id/shoots", h.ListYeekeeShoots) // เลขยิงในรอบ (paginated)
+				yeekee.GET("/stats", h.GetYeekeeStats)              // สถิติวันนี้
+			}
+
 			// Affiliate Settings — commission rates + withdrawal conditions
 			affiliate := protected.Group("/affiliate")
 			{

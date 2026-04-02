@@ -180,3 +180,41 @@ type ReferralCommission struct {
 }
 
 func (ReferralCommission) TableName() string { return "referral_commissions" }
+
+// =============================================================================
+// Yeekee Models — ⭐ เหมือนกับ member-api (#3) เพราะ share DB
+// =============================================================================
+
+// YeekeeRound รอบยี่กี (88 รอบ/วัน)
+// table: yeekee_rounds
+type YeekeeRound struct {
+	ID             int64     `gorm:"primaryKey" json:"id"`
+	LotteryRoundID int64     `gorm:"not null;index" json:"lottery_round_id"`
+	RoundNo        int       `gorm:"not null" json:"round_no"`
+	StartTime      time.Time `gorm:"not null" json:"start_time"`
+	EndTime        time.Time `gorm:"not null" json:"end_time"`
+	Status         string    `gorm:"size:20;not null;default:waiting" json:"status"`
+	ResultNumber   string    `gorm:"size:5" json:"result_number"`
+	TotalShoots    int       `gorm:"default:0" json:"total_shoots"`
+	TotalSum       int64     `gorm:"default:0" json:"total_sum"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	// Relations
+	LotteryRound *LotteryRound `gorm:"foreignKey:LotteryRoundID" json:"lottery_round,omitempty"`
+}
+
+func (YeekeeRound) TableName() string { return "yeekee_rounds" }
+
+// YeekeeShoot เลขที่สมาชิกยิง (5 หลัก)
+// table: yeekee_shoots
+type YeekeeShoot struct {
+	ID            int64     `gorm:"primaryKey" json:"id"`
+	YeekeeRoundID int64     `gorm:"not null;index" json:"yeekee_round_id"`
+	MemberID      int64     `gorm:"not null;index" json:"member_id"`
+	Number        string    `gorm:"size:5;not null" json:"number"`
+	ShotAt        time.Time `gorm:"not null" json:"shot_at"`
+	// Relations
+	Member *Member `gorm:"foreignKey:MemberID" json:"member,omitempty"`
+}
+
+func (YeekeeShoot) TableName() string { return "yeekee_shoots" }

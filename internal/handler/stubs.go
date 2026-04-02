@@ -855,3 +855,144 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 	h.DB.Exec("UPDATE withdraw_requests SET status = 'rejected', approved_at = ? WHERE id = ? AND status = 'pending'", time.Now(), id)
 	ok(c, gin.H{"id": id, "status": "rejected"})
 }
+
+// =============================================================================
+// ⭐ Yeekee Monitoring — ดูรอบ + สถิติยี่กี real-time
+// =============================================================================
+
+// ListYeekeeRounds แสดงรายการรอบยี่กี (paginated + filter)
+// GET /api/v1/yeekee/rounds?status=shooting&date=2026-04-02&page=1&per_page=20
+func (h *Handler) ListYeekeeRounds(c *gin.Context) {
+	page, perPage := pageParams(c)
+	var rounds []model.YeekeeRound
+	var total int64
+
+	query := h.DB.Model(&model.YeekeeRound{})
+
+	// Filter by status
+	if s := c.Query("status"); s != "" {
+		query = query.Where("status = ?", s)
+	}
+
+	// Filter by date (ใช้ start_time ของรอบ)
+	if d := c.Query("date"); d != "" {
+		query = query.Where("DATE(start_time) = ?", d)
+	} else {
+		// Default: วันนี้
+		today := time.Now().Format("2006-01-02")
+		query = query.Where("DATE(start_time) = ?", today)
+	}
+
+	query.Count(&total)
+	query.
+		Preload("LotteryRound").
+		Order("start_time ASC").
+		Offset((page - 1) * perPage).
+		Limit(perPage).
+		Find(&rounds)
+
+	paginated(c, rounds, total, page, perPage)
+}
+
+// GetYeekeeRoundDetail ดูรอบยี่กีรอบเดียว + shoots + bet summary
+// GET /api/v1/yeekee/rounds/:id
+func (h *Handler) GetYeekeeRoundDetail(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	var round model.YeekeeRound
+	if err := h.DB.Preload("LotteryRound").First(&round, id).Error; err != nil {
+		fail(c, 404, "yeekee round not found")
+		return
+	}
+
+	// ดึง shoots (ไม่ paginate — แสดงทั้งหมดเพราะแต่ละรอบไม่มาก)
+	var shoots []model.YeekeeShoot
+	h.DB.Where("yeekee_round_id = ?", id).Preload("Member").Order("shot_at ASC").Find(&shoots)
+
+	// Bet summary — จำนวน bets + ยอดแทง + ยอดจ่าย ของรอบนี้
+	var betSummary struct {
+		TotalBets   int64   `json:"total_bets"`
+		TotalAmount float64 `json:"total_amount"`
+		TotalPayout float64 `json:"total_payout"`
+		WinnerCount int64   `json:"winner_count"`
+	}
+	h.DB.Model(&model.Bet{}).
+		Where("lottery_round_id = ?", round.LotteryRoundID).
+		Select("COUNT(*) as total_bets, COALESCE(SUM(amount), 0) as total_amount, COALESCE(SUM(win_amount), 0) as total_payout").
+		Scan(&betSummary)
+	h.DB.Model(&model.Bet{}).
+		Where("lottery_round_id = ? AND status = ?", round.LotteryRoundID, "won").
+		Count(&betSummary.WinnerCount)
+
+	ok(c, gin.H{
+		"round":       round,
+		"shoots":      shoots,
+		"bet_summary": betSummary,
+	})
+}
+
+// ListYeekeeShoots ดูเลขยิงในรอบ (paginated)
+// GET /api/v1/yeekee/rounds/:id/shoots?page=1&per_page=50
+func (h *Handler) ListYeekeeShoots(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	page, perPage := pageParams(c)
+
+	var shoots []model.YeekeeShoot
+	var total int64
+
+	query := h.DB.Model(&model.YeekeeShoot{}).Where("yeekee_round_id = ?", id)
+	query.Count(&total)
+	query.
+		Preload("Member").
+		Order("shot_at ASC").
+		Offset((page - 1) * perPage).
+		Limit(perPage).
+		Find(&shoots)
+
+	paginated(c, shoots, total, page, perPage)
+}
+
+// GetYeekeeStats สถิติยี่กีวันนี้
+// GET /api/v1/yeekee/stats
+func (h *Handler) GetYeekeeStats(c *gin.Context) {
+	today := time.Now().Format("2006-01-02")
+
+	var stats struct {
+		TotalRounds    int64   `json:"total_rounds"`
+		WaitingCount   int64   `json:"waiting_count"`
+		ShootingCount  int64   `json:"shooting_count"`
+		ResultedCount  int64   `json:"resulted_count"`
+		TotalShoots    int64   `json:"total_shoots"`
+		TotalBets      int64   `json:"total_bets"`
+		TotalBetAmount float64 `json:"total_bet_amount"`
+		TotalPayout    float64 `json:"total_payout"`
+		Profit         float64 `json:"profit"`
+	}
+
+	// นับรอบตาม status
+	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today).Count(&stats.TotalRounds)
+	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ? AND status = ?", today, "waiting").Count(&stats.WaitingCount)
+	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ? AND status = ?", today, "shooting").Count(&stats.ShootingCount)
+	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ? AND status = ?", today, "resulted").Count(&stats.ResultedCount)
+
+	// นับ shoots วันนี้
+	h.DB.Model(&model.YeekeeShoot{}).
+		Joins("JOIN yeekee_rounds ON yeekee_shoots.yeekee_round_id = yeekee_rounds.id").
+		Where("DATE(yeekee_rounds.start_time) = ?", today).
+		Count(&stats.TotalShoots)
+
+	// สถิติ bets — ดึงเฉพาะ bets ของรอบยี่กีวันนี้
+	var yeekeeRoundIDs []int64
+	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today).Pluck("lottery_round_id", &yeekeeRoundIDs)
+
+	if len(yeekeeRoundIDs) > 0 {
+		h.DB.Model(&model.Bet{}).Where("lottery_round_id IN ?", yeekeeRoundIDs).Count(&stats.TotalBets)
+		h.DB.Model(&model.Bet{}).Where("lottery_round_id IN ?", yeekeeRoundIDs).
+			Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalBetAmount)
+		h.DB.Model(&model.Bet{}).Where("lottery_round_id IN ? AND status = ?", yeekeeRoundIDs, "won").
+			Select("COALESCE(SUM(win_amount), 0)").Scan(&stats.TotalPayout)
+		stats.Profit = stats.TotalBetAmount - stats.TotalPayout
+	}
+
+	ok(c, stats)
+}
