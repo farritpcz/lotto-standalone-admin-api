@@ -43,8 +43,9 @@ type Config struct {
 	RKAutoBaseURL    string   // https://45.32.117.90/api/v1
 	RKAutoAPIKey     string
 	RKAutoAPISecret  string
-	RKAutoWebhookIPs string   // comma-separated IP whitelist (ว่าง = ไม่เช็ค)
-	WebhookBaseURL   string   // URL สาธารณะของเรา สำหรับ callback
+	RKAutoWebhookIPs    string // comma-separated IP whitelist (ว่าง = ไม่เช็ค)
+	RKAutoEncryptionKey string // AES-256 key สำหรับเข้ารหัส bank credentials (32 chars)
+	WebhookBaseURL      string // URL สาธารณะของเรา สำหรับ callback
 }
 
 // Load โหลด config จาก environment variables
@@ -73,8 +74,9 @@ func Load() *Config {
 		RKAutoBaseURL:    getEnv("RKAUTO_BASE_URL", "https://45.32.117.90/api/v1"),
 		RKAutoAPIKey:     getEnv("RKAUTO_API_KEY", ""),
 		RKAutoAPISecret:  getEnv("RKAUTO_API_SECRET", ""),
-		RKAutoWebhookIPs: getEnv("RKAUTO_WEBHOOK_IPS", "45.32.117.90"),
-		WebhookBaseURL:   getEnv("WEBHOOK_BASE_URL", ""),
+		RKAutoWebhookIPs:    getEnv("RKAUTO_WEBHOOK_IPS", "45.32.117.90"),
+		RKAutoEncryptionKey: getEnv("RKAUTO_ENCRYPTION_KEY", "default-key-change-in-prod!!!!"),
+		WebhookBaseURL:      getEnv("WEBHOOK_BASE_URL", ""),
 	}
 }
 

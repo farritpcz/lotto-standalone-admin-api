@@ -1837,12 +1837,15 @@ func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 		fail(c, 400, "RKAUTO: "+resp.Message); return
 	}
 
-	// อัพเดท DB
+	// อัพเดท DB — ⚠️ encrypt bank credentials ด้วย AES-256
+	encUsername, _ := rkautoLib.Encrypt(username, h.EncryptionKey)
+	encPassword, _ := rkautoLib.Encrypt(password, h.EncryptionKey)
+
 	h.DB.Exec(`UPDATE agent_bank_accounts SET
 		rkauto_uuid = ?, rkauto_status = 'registered', bank_system = ?,
 		bank_username = ?, bank_password = ?
 		WHERE id = ?`,
-		resp.Data.UUID, req.BankSystem, req.Username, "***encrypted***", id)
+		resp.Data.UUID, req.BankSystem, encUsername, encPassword, id)
 
 	log.Printf("✅ RKAUTO registered bank #%d → UUID: %s", id, resp.Data.UUID)
 	ok(c, gin.H{"id": id, "rkauto_uuid": resp.Data.UUID, "status": "registered"})

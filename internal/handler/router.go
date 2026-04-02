@@ -61,6 +61,7 @@ type Handler struct {
 	DB                  *gorm.DB         // inject จาก main.go — ⭐ share DB กับ member-api (#3)
 	Redis               *redis.Client    // Redis สำหรับ cache dashboard stats
 	RKAutoClient        interface{}      // *rkauto.Client (nil = disabled)
+	EncryptionKey       string           // AES-256 key สำหรับ encrypt bank credentials
 }
 
 // NewHandler สร้าง Handler instance
@@ -149,6 +150,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				withdrawals.GET("", h.ListWithdrawRequests)
 				withdrawals.PUT("/:id/approve", h.ApproveWithdraw)
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
+			}
+
+			// Agent Bank Accounts — CRUD
+			agentBank := protected.Group("/agent/bank-accounts")
+			{
+				agentBank.GET("", h.ListAgentBankAccounts)
+				agentBank.POST("", h.CreateAgentBankAccount)
+				agentBank.PUT("/:id", h.UpdateAgentBankAccount)
+				agentBank.DELETE("/:id", h.DeleteAgentBankAccount)
 			}
 
 			// RKAUTO Bank Account Operations

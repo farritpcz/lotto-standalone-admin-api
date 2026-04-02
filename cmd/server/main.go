@@ -78,6 +78,7 @@ func main() {
 	h := handler.NewHandler(cfg.AdminJWTSecret, cfg.AdminJWTExpiryHours)
 	h.DB = db
 	h.Redis = rdb
+	h.EncryptionKey = cfg.RKAutoEncryptionKey
 	h.SetupRoutes(r)
 
 	// ⚠️ RKAUTO Webhook Routes (PUBLIC — signature verified)
