@@ -123,7 +123,64 @@ func (h *Handler) GetMember(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var member model.Member
 	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
-	ok(c, member)
+
+	// ── Aggregated data: ยอดแทง/ชนะ/ฝาก/ถอน + referrer username ──
+	type AggBet struct {
+		TotalBets      int64   `json:"total_bets"`
+		TotalBetAmount float64 `json:"total_bet_amount"`
+		TotalWinAmount float64 `json:"total_win_amount"`
+	}
+	var agg AggBet
+	h.DB.Raw(`
+		SELECT COUNT(*) as total_bets,
+		       COALESCE(SUM(amount), 0) as total_bet_amount,
+		       COALESCE(SUM(CASE WHEN status = 'won' THEN win_amount ELSE 0 END), 0) as total_win_amount
+		FROM bets WHERE member_id = ?
+	`, id).Scan(&agg)
+
+	type AggTx struct {
+		TotalDeposit  float64 `json:"total_deposit"`
+		TotalWithdraw float64 `json:"total_withdraw"`
+	}
+	var aggTx AggTx
+	h.DB.Raw(`
+		SELECT COALESCE(SUM(CASE WHEN type IN ('deposit','admin_credit') THEN amount ELSE 0 END), 0) as total_deposit,
+		       COALESCE(SUM(CASE WHEN type IN ('withdraw','admin_debit') THEN ABS(amount) ELSE 0 END), 0) as total_withdraw
+		FROM transactions WHERE member_id = ?
+	`, id).Scan(&aggTx)
+
+	// referrer username (ถ้ามี referred_by)
+	var referrerUsername string
+	if member.ReferredBy != nil {
+		var referrer model.Member
+		if err := h.DB.Select("username").First(&referrer, *member.ReferredBy).Error; err == nil {
+			referrerUsername = referrer.Username
+		}
+	}
+
+	// สร้าง response รวม member + aggregated data
+	resp := gin.H{
+		"id":                  member.ID,
+		"username":            member.Username,
+		"phone":               member.Phone,
+		"email":               member.Email,
+		"balance":             member.Balance,
+		"status":              member.Status,
+		"referred_by":         member.ReferredBy,
+		"bank_code":           member.BankCode,
+		"bank_account_number": member.BankAccountNumber,
+		"bank_account_name":   member.BankAccountName,
+		"created_at":          member.CreatedAt,
+		"updated_at":          member.UpdatedAt,
+		// aggregated
+		"referrer_username": referrerUsername,
+		"total_bets":        agg.TotalBets,
+		"total_bet_amount":  agg.TotalBetAmount,
+		"total_win_amount":  agg.TotalWinAmount,
+		"total_deposit":     aggTx.TotalDeposit,
+		"total_withdraw":    aggTx.TotalWithdraw,
+	}
+	ok(c, resp)
 }
 
 func (h *Handler) UpdateMember(c *gin.Context) {
