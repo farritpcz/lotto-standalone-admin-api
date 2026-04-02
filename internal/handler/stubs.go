@@ -71,9 +71,19 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		fail(c, 403, "account suspended"); return
 	}
 
-	// อัพเดท last login
+	// อัพเดท last login + IP
 	now := time.Now()
-	h.DB.Model(&admin).Update("last_login_at", &now)
+	ip := c.ClientIP()
+	h.DB.Model(&admin).Updates(map[string]interface{}{"last_login_at": &now, "last_login_ip": ip})
+
+	// บันทึก login history
+	h.DB.Create(&model.AdminLoginHistory{
+		AdminID:   admin.ID,
+		IP:        ip,
+		UserAgent: c.GetHeader("User-Agent"),
+		Success:   true,
+		CreatedAt: now,
+	})
 
 	// สร้าง JWT token จริง
 	token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, admin.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
@@ -81,7 +91,7 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		fail(c, 500, "failed to generate token")
 		return
 	}
-	ok(c, gin.H{"admin": admin, "token": token})
+	ok(c, gin.H{"admin": admin, "token": token, "permissions": admin.Permissions})
 }
 
 // =============================================================================
@@ -1672,4 +1682,87 @@ func (h *Handler) DeleteStaff(c *gin.Context) {
 	if id == adminID { fail(c, 400, "ไม่สามารถลบตัวเองได้"); return }
 	h.DB.Model(&model.Admin{}).Where("id = ?", id).Update("status", "deleted")
 	ok(c, gin.H{"id": id, "status": "deleted"})
+}
+
+// GetStaffLoginHistory ดูประวัติ login ของพนักงาน
+// GET /api/v1/staff/:id/login-history
+func (h *Handler) GetStaffLoginHistory(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var history []model.AdminLoginHistory
+	h.DB.Where("admin_id = ?", id).Order("created_at DESC").Limit(50).Find(&history)
+	ok(c, history)
+}
+
+// GetStaffActivity ดู activity log ของพนักงานคนเดียว
+// GET /api/v1/staff/:id/activity
+func (h *Handler) GetStaffActivity(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var logs []model.ActivityLog
+	h.DB.Where("admin_id = ?", id).Order("created_at DESC").Limit(50).Find(&logs)
+	ok(c, logs)
+}
+
+// GetAvailablePermissions คืน permissions ทั้งหมดที่ตั้งได้
+// GET /api/v1/staff/permissions
+func (h *Handler) GetAvailablePermissions(c *gin.Context) {
+	type PermGroup struct {
+		Group string   `json:"group"`
+		Label string   `json:"label"`
+		Perms []struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		} `json:"perms"`
+	}
+
+	permissions := []gin.H{
+		{
+			"group": "members", "label": "สมาชิก",
+			"perms": []gin.H{
+				{"key": "members.view", "label": "ดูรายการสมาชิก"},
+				{"key": "members.detail", "label": "ดูรายละเอียดสมาชิก"},
+				{"key": "members.edit", "label": "แก้ไขข้อมูลสมาชิก"},
+				{"key": "members.suspend", "label": "ระงับ/เปิดบัญชี"},
+				{"key": "members.adjust_balance", "label": "ปรับยอดเงิน (เติม/หัก)"},
+			},
+		},
+		{
+			"group": "lottery", "label": "หวย",
+			"perms": []gin.H{
+				{"key": "lotteries.view", "label": "ดูประเภทหวย"},
+				{"key": "rounds.create", "label": "สร้างรอบหวย"},
+				{"key": "results.submit", "label": "กรอกผลหวย"},
+				{"key": "bans.manage", "label": "จัดการเลขอั้น"},
+				{"key": "rates.manage", "label": "แก้ไขอัตราจ่าย"},
+			},
+		},
+		{
+			"group": "finance", "label": "การเงิน",
+			"perms": []gin.H{
+				{"key": "deposits.view", "label": "ดูรายการฝาก"},
+				{"key": "deposits.approve", "label": "อนุมัติ/ปฏิเสธฝาก"},
+				{"key": "withdrawals.view", "label": "ดูรายการถอน"},
+				{"key": "withdrawals.approve", "label": "อนุมัติ/ปฏิเสธถอน"},
+			},
+		},
+		{
+			"group": "reports", "label": "รายงาน",
+			"perms": []gin.H{
+				{"key": "dashboard.view", "label": "ดู Dashboard"},
+				{"key": "reports.view", "label": "ดูรายงาน"},
+				{"key": "bets.view", "label": "ดูรายการแทง"},
+				{"key": "transactions.view", "label": "ดูธุรกรรม"},
+			},
+		},
+		{
+			"group": "system", "label": "ระบบ",
+			"perms": []gin.H{
+				{"key": "staff.manage", "label": "จัดการพนักงาน"},
+				{"key": "settings.manage", "label": "ตั้งค่าระบบ"},
+				{"key": "cms.manage", "label": "จัดการหน้าเว็บ"},
+				{"key": "affiliate.manage", "label": "จัดการ Affiliate"},
+			},
+		},
+	}
+
+	ok(c, permissions)
 }

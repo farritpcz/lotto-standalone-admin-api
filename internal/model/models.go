@@ -12,13 +12,38 @@ type Admin struct {
 	Username     string     `gorm:"size:50;uniqueIndex;not null" json:"username"`
 	PasswordHash string     `gorm:"size:255;not null" json:"-"`
 	Name         string     `gorm:"size:100" json:"name"`
-	Role         string     `gorm:"size:20;not null;default:admin" json:"role"`   // admin, operator, viewer
-	Permissions  string     `gorm:"type:text" json:"permissions"`                 // JSON array เช่น ["members","deposits","results"]
+	Role         string     `gorm:"size:20;not null;default:admin" json:"role"`   // owner, admin, operator, viewer
+	Permissions  string     `gorm:"type:text" json:"permissions"`                 // JSON array เช่น ["members.view","deposits.approve"]
 	Status       string     `gorm:"size:20;not null;default:active" json:"status"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
+	LastLoginIP  string     `gorm:"size:45" json:"last_login_ip"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
+
+// AdminLoginHistory ประวัติ login ของ admin
+type AdminLoginHistory struct {
+	ID        int64     `gorm:"primaryKey" json:"id"`
+	AdminID   int64     `gorm:"index;not null" json:"admin_id"`
+	IP        string    `gorm:"size:45" json:"ip"`
+	UserAgent string    `gorm:"size:255" json:"user_agent"`
+	Success   bool      `gorm:"not null" json:"success"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (AdminLoginHistory) TableName() string { return "admin_login_history" }
+
+// ─── Permission Constants ──────────────────────────────────────────
+// หมวดสมาชิก
+// members.view, members.detail, members.edit, members.suspend, members.adjust_balance
+// หมวดหวย
+// lotteries.view, rounds.create, results.submit, bans.manage, rates.manage
+// หมวดการเงิน
+// deposits.view, deposits.approve, withdrawals.view, withdrawals.approve
+// หมวดรายงาน
+// reports.view, dashboard.view
+// หมวดระบบ
+// settings.manage, staff.manage, cms.manage, affiliate.manage
 
 type Member struct {
 	ID           int64     `gorm:"primaryKey" json:"id"`

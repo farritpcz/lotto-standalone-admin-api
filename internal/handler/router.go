@@ -169,14 +169,17 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				yeekee.GET("/stats", h.GetYeekeeStats)              // สถิติวันนี้
 			}
 
-			// Staff (Admin Users) — CRUD + permissions
+			// Staff (Admin Users) — CRUD + permissions + history
 			staff := protected.Group("/staff")
 			{
 				staff.GET("", h.ListStaff)
+				staff.GET("/permissions", h.GetAvailablePermissions)
 				staff.POST("", h.CreateStaff)
 				staff.PUT("/:id", h.UpdateStaff)
 				staff.PUT("/:id/status", h.UpdateStaffStatus)
 				staff.DELETE("/:id", h.DeleteStaff)
+				staff.GET("/:id/login-history", h.GetStaffLoginHistory)
+				staff.GET("/:id/activity", h.GetStaffActivity)
 			}
 
 			// Affiliate Settings — commission rates + withdrawal conditions
