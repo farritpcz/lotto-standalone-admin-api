@@ -134,22 +134,45 @@ func (h *Handler) GetDashboard(c *gin.Context) {
 }
 
 // GetDashboardV2 — dashboard ใหม่ครบทุก section (แบบเจริญดี88)
-// GET /api/v1/dashboard/v2?month=2026-04
+// GET /api/v1/dashboard/v2?from=2026-04-01&to=2026-04-02
+//
+// Presets ที่ frontend ส่งมา:
+//   - วันนี้: from=today, to=today
+//   - เมื่อวาน: from=yesterday, to=yesterday
+//   - อาทิตย์นี้: from=2026-03-31, to=2026-04-06
+//   - เดือนนี้: from=2026-04-01, to=2026-04-30
+//   - ต้นเดือน: from=2026-04-01, to=2026-04-15
+//   - ท้ายเดือน: from=2026-04-16, to=2026-04-30
 func (h *Handler) GetDashboardV2(c *gin.Context) {
-	// ─── parse month param (default = เดือนนี้) ───
-	monthStr := c.DefaultQuery("month", time.Now().Format("2006-01"))
-	monthStart, _ := time.Parse("2006-01", monthStr)
-	if monthStart.IsZero() {
-		monthStart = time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.Local)
-	}
-	monthEnd := monthStart.AddDate(0, 1, 0)
-	lastMonthStart := monthStart.AddDate(0, -1, 0)
-	todayStart := time.Now().Truncate(24 * time.Hour)
+	// ─── parse from/to params ───
+	now := time.Now()
+	todayStart := now.Truncate(24 * time.Hour)
 	todayEnd := todayStart.Add(24 * time.Hour)
 
-	// ─── Redis cache 60s ───
+	// default = เดือนนี้
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
+	rangeFrom := monthStart
+	rangeTo := monthStart.AddDate(0, 1, 0)
+
+	if fromStr := c.Query("from"); fromStr != "" {
+		if parsed, err := time.Parse("2006-01-02", fromStr); err == nil {
+			rangeFrom = parsed
+		}
+	}
+	if toStr := c.Query("to"); toStr != "" {
+		if parsed, err := time.Parse("2006-01-02", toStr); err == nil {
+			rangeTo = parsed.Add(24 * time.Hour) // inclusive end date
+		}
+	}
+
+	// สำหรับ % เปรียบเทียบ: ช่วงเวลาเดียวกันก่อนหน้า
+	rangeDuration := rangeTo.Sub(rangeFrom)
+	prevFrom := rangeFrom.Add(-rangeDuration)
+	prevTo := rangeFrom
+
+	// ─── Redis cache 30s (สั้นลงเพราะ filter เปลี่ยนบ่อย) ───
 	ctx := c.Request.Context()
-	cacheKey := "admin:dashboardV2:" + monthStr
+	cacheKey := "admin:dashboardV2:" + rangeFrom.Format("20060102") + ":" + rangeTo.Format("20060102")
 	if h.Redis != nil {
 		if cached, err := h.Redis.Get(ctx, cacheKey).Result(); err == nil {
 			c.Data(200, "application/json", []byte(cached))
@@ -171,23 +194,23 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 	var summary MonthSummary
 
 	// ฝาก
-	h.DB.Table("transactions").Where("type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("transactions").Where("type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.DepositsThisMonth)
-	h.DB.Table("transactions").Where("type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?", lastMonthStart, monthStart).
+	h.DB.Table("transactions").Where("type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?", prevFrom, prevTo).
 		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.DepositsLastMonth)
 	// ถอน
-	h.DB.Table("transactions").Where("type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("transactions").Where("type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.WithdrawalsThisMonth)
-	h.DB.Table("transactions").Where("type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?", lastMonthStart, monthStart).
+	h.DB.Table("transactions").Where("type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?", prevFrom, prevTo).
 		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.WithdrawalsLastMonth)
 	// กำไร = ยอดแทง - ยอดจ่าย
-	h.DB.Table("bets").Where("created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("bets").Where("created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(amount),0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END),0)").Scan(&summary.ProfitThisMonth)
-	h.DB.Table("bets").Where("created_at >= ? AND created_at < ?", lastMonthStart, monthStart).
+	h.DB.Table("bets").Where("created_at >= ? AND created_at < ?", prevFrom, prevTo).
 		Select("COALESCE(SUM(amount),0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END),0)").Scan(&summary.ProfitLastMonth)
 	// สมาชิกใหม่
-	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ?", monthStart, monthEnd).Count(&summary.NewMembersThisMonth)
-	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ?", lastMonthStart, monthStart).Count(&summary.NewMembersLastMonth)
+	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ?", rangeFrom, rangeTo).Count(&summary.NewMembersThisMonth)
+	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ?", prevFrom, prevTo).Count(&summary.NewMembersLastMonth)
 
 	// ═══ 2. Chart: ฝาก/ถอน 30 วันย้อนหลัง ═══
 	type ChartPoint struct {
@@ -221,7 +244,7 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		FROM bets b LEFT JOIN members m ON m.id = b.member_id
 		WHERE b.created_at >= ? AND b.created_at < ?
 		GROUP BY b.member_id, m.username ORDER BY total_bet DESC LIMIT 10
-	`, monthStart, monthEnd).Scan(&topBettors)
+	`, rangeFrom, rangeTo).Scan(&topBettors)
 
 	// ═══ 4. Top 10 สมาชิกยอดฝาก/ถอนสูงสุด ═══
 	type TopDepositor struct {
@@ -238,7 +261,7 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		FROM transactions t LEFT JOIN members m ON m.id = t.member_id
 		WHERE t.created_at >= ? AND t.created_at < ?
 		GROUP BY t.member_id, m.username ORDER BY total_deposit DESC LIMIT 10
-	`, monthStart, monthEnd).Scan(&topDepositors)
+	`, rangeFrom, rangeTo).Scan(&topDepositors)
 
 	// ═══ 5. ธุรกรรมล่าสุด (5 ฝาก + 5 ถอน) ═══
 	type RecentTx struct {
@@ -279,16 +302,16 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		CancelledWithdraw float64 `json:"cancelled_withdrawals"`
 	}
 	var credits CreditStats
-	h.DB.Table("transactions").Where("type='admin_credit' AND created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("transactions").Where("type='admin_credit' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&credits.CreditAdded)
-	h.DB.Table("transactions").Where("type='admin_debit' AND created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("transactions").Where("type='admin_debit' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&credits.CreditDeducted)
-	h.DB.Table("deposit_requests").Where("status='approved' AND created_at >= ? AND created_at < ?", monthStart, monthEnd).Count(&credits.DepositCount)
-	h.DB.Table("referral_commissions").Where("created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("deposit_requests").Where("status='approved' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).Count(&credits.DepositCount)
+	h.DB.Table("referral_commissions").Where("created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(amount),0)").Scan(&credits.CommissionTotal)
-	h.DB.Table("deposit_requests").Where("status='cancelled' AND created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("deposit_requests").Where("status='cancelled' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(amount),0)").Scan(&credits.CancelledDeposit)
-	h.DB.Table("withdraw_requests").Where("status='rejected' AND created_at >= ? AND created_at < ?", monthStart, monthEnd).
+	h.DB.Table("withdraw_requests").Where("status='rejected' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
 		Select("COALESCE(SUM(amount),0)").Scan(&credits.CancelledWithdraw)
 
 	// ═══ 8. บัญชีธนาคาร ═══
