@@ -924,9 +924,17 @@ func (h *Handler) GetYeekeeRoundDetail(c *gin.Context) {
 		Where("lottery_round_id = ? AND status = ?", round.LotteryRoundID, "won").
 		Count(&betSummary.WinnerCount)
 
+	// ⭐ ดึง bets ทั้งหมดของรอบนี้ (พร้อม member + bet_type)
+	var bets []model.Bet
+	h.DB.Where("lottery_round_id = ?", round.LotteryRoundID).
+		Preload("Member").Preload("BetType").
+		Order("created_at DESC").
+		Find(&bets)
+
 	ok(c, gin.H{
 		"round":       round,
 		"shoots":      shoots,
+		"bets":        bets,
 		"bet_summary": betSummary,
 	})
 }
