@@ -84,6 +84,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 		{
 			// Dashboard
 			protected.GET("/dashboard", h.GetDashboard)
+			protected.GET("/dashboard/v2", h.GetDashboardV2)
 
 			// Members
 			protected.GET("/members", h.ListMembers)
