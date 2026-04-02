@@ -60,6 +60,7 @@ type Handler struct {
 	AdminJWTExpiryHours int
 	DB                  *gorm.DB         // inject จาก main.go — ⭐ share DB กับ member-api (#3)
 	Redis               *redis.Client    // Redis สำหรับ cache dashboard stats
+	RKAutoClient        interface{}      // *rkauto.Client (nil = disabled)
 }
 
 // NewHandler สร้าง Handler instance
@@ -197,4 +198,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "lotto-standalone-admin-api"})
 	})
+}
+
+// SetupWebhookRoutes ลงทะเบียน webhook routes (PUBLIC — ไม่ต้อง JWT)
+// ⚠️ SECURITY: ป้องกันด้วย WebhookSecurity middleware (IP whitelist + signature + rate limit)
+func (h *Handler) SetupWebhookRoutes(r *gin.Engine, webhookCfg mw.WebhookSecurityConfig) {
+	webhooks := r.Group("/webhooks/rkauto")
+	webhooks.Use(mw.WebhookSecurity(webhookCfg))
+	{
+		webhooks.POST("/deposit-notify", h.HandleDepositNotify)
+		webhooks.POST("/withdraw-notify", h.HandleWithdrawNotify)
+	}
 }

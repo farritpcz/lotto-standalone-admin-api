@@ -24,6 +24,7 @@ import (
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/config"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/handler"
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/rkauto"
 )
 
 func main() {
@@ -78,6 +79,38 @@ func main() {
 	h.DB = db
 	h.Redis = rdb
 	h.SetupRoutes(r)
+
+	// ⚠️ RKAUTO Webhook Routes (PUBLIC — signature verified)
+	if cfg.RKAutoEnabled {
+		rkautoClient := rkauto.NewClient(cfg.RKAutoBaseURL, cfg.RKAutoAPIKey, cfg.RKAutoAPISecret)
+		h.RKAutoClient = rkautoClient
+
+		webhookIPs := strings.Split(cfg.RKAutoWebhookIPs, ",")
+		h.SetupWebhookRoutes(r, mw.WebhookSecurityConfig{
+			APISecret:  cfg.RKAutoAPISecret,
+			AllowedIPs: webhookIPs,
+			RateLimit:  100,
+		})
+
+		// ตั้ง webhook URLs ถ้ามี WebhookBaseURL
+		if cfg.WebhookBaseURL != "" {
+			go func() {
+				_, err := rkautoClient.UpdateWebhookURLs(
+					cfg.WebhookBaseURL+"/webhooks/rkauto/deposit-notify",
+					cfg.WebhookBaseURL+"/webhooks/rkauto/withdraw-notify",
+				)
+				if err != nil {
+					log.Printf("⚠️ Failed to set RKAUTO webhook URLs: %v", err)
+				} else {
+					log.Println("✅ RKAUTO webhook URLs configured")
+				}
+			}()
+		}
+
+		log.Println("✅ RKAUTO enabled — webhook routes registered")
+	} else {
+		log.Println("ℹ️ RKAUTO disabled (set RKAUTO_ENABLED=true to enable)")
+	}
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("🔧 lotto-standalone-admin-api starting on %s (env: %s)", addr, cfg.Env)

@@ -37,6 +37,14 @@ type Config struct {
 	// JWT — admin ใช้ secret แยกจาก member เพื่อความปลอดภัย
 	AdminJWTSecret     string
 	AdminJWTExpiryHours int
+
+	// RKAUTO (GobexPay) — payment gateway อัตโนมัติ
+	RKAutoEnabled    bool
+	RKAutoBaseURL    string   // https://45.32.117.90/api/v1
+	RKAutoAPIKey     string
+	RKAutoAPISecret  string
+	RKAutoWebhookIPs string   // comma-separated IP whitelist (ว่าง = ไม่เช็ค)
+	WebhookBaseURL   string   // URL สาธารณะของเรา สำหรับ callback
 }
 
 // Load โหลด config จาก environment variables
@@ -58,7 +66,15 @@ func Load() *Config {
 		RedisDB:       getEnvInt("REDIS_DB", 1), // ใช้ DB 1 (member ใช้ DB 0)
 
 		AdminJWTSecret:      getEnv("ADMIN_JWT_SECRET", "admin-secret-change-in-production"),
-		AdminJWTExpiryHours: getEnvInt("ADMIN_JWT_EXPIRY_HOURS", 8), // admin token อายุสั้นกว่า
+		AdminJWTExpiryHours: getEnvInt("ADMIN_JWT_EXPIRY_HOURS", 8),
+
+		// RKAUTO
+		RKAutoEnabled:    getEnv("RKAUTO_ENABLED", "false") == "true",
+		RKAutoBaseURL:    getEnv("RKAUTO_BASE_URL", "https://45.32.117.90/api/v1"),
+		RKAutoAPIKey:     getEnv("RKAUTO_API_KEY", ""),
+		RKAutoAPISecret:  getEnv("RKAUTO_API_SECRET", ""),
+		RKAutoWebhookIPs: getEnv("RKAUTO_WEBHOOK_IPS", "45.32.117.90"),
+		WebhookBaseURL:   getEnv("WEBHOOK_BASE_URL", ""),
 	}
 }
 
