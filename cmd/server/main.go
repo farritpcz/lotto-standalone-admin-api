@@ -11,6 +11,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/mysql"
@@ -19,13 +21,21 @@ import (
 
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/config"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/handler"
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 func main() {
 	cfg := config.Load()
 
+	// ⚠️ บังคับ JWT secret ใน production — ห้ามใช้ default
 	if cfg.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
+		if cfg.AdminJWTSecret == "admin-secret-change-in-production" {
+			log.Fatal("❌ ADMIN_JWT_SECRET must be set in production (cannot use default)")
+		}
+		if cfg.DBPassword == "password" {
+			log.Fatal("❌ DB_PASSWORD must be set in production (cannot use default)")
+		}
 	}
 
 	// =================================================================
@@ -47,18 +57,12 @@ func main() {
 	// =================================================================
 	r := gin.Default()
 
-	// CORS middleware — ให้ admin-web (#6) เรียก API ได้
-	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
-		c.Header("Access-Control-Max-Age", "86400")
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-		c.Next()
-	})
+	// CORS middleware — whitelist เฉพาะ domain ที่อนุญาต
+	allowedOrigins := strings.Split(getEnv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:3002"), ",")
+	r.Use(mw.CORS(allowedOrigins))
+
+	// Global rate limit — 10 req/sec, burst 30 (ป้องกัน DoS)
+	r.Use(mw.RateLimit(10, 30))
 
 	h := handler.NewHandler(cfg.AdminJWTSecret, cfg.AdminJWTExpiryHours)
 	h.DB = db // inject DB ให้ handler ใช้
@@ -71,4 +75,11 @@ func main() {
 	if err := r.Run(addr); err != nil {
 		log.Fatal("failed to start server:", err)
 	}
+}
+
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
 }

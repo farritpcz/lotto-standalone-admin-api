@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
 )
 
@@ -73,8 +74,13 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 	now := time.Now()
 	h.DB.Model(&admin).Update("last_login_at", &now)
 
-	// TODO: สร้าง JWT token จริง
-	ok(c, gin.H{"admin": admin, "token": "admin-jwt-token-TODO"})
+	// สร้าง JWT token จริง
+	token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, admin.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
+	if err != nil {
+		fail(c, 500, "failed to generate token")
+		return
+	}
+	ok(c, gin.H{"admin": admin, "token": token})
 }
 
 // =============================================================================

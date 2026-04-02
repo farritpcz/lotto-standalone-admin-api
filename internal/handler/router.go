@@ -49,6 +49,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 // Handler รวม dependencies ทั้งหมด
@@ -74,8 +76,8 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 		api.POST("/auth/login", h.AdminLogin)
 
 		// === Protected (ต้อง Admin JWT) ===
-		// TODO: เพิ่ม admin JWT middleware
 		protected := api.Group("")
+		protected.Use(mw.AdminJWTAuth(h.AdminJWTSecret))
 		{
 			// Dashboard
 			protected.GET("/dashboard", h.GetDashboard)
