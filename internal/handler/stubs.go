@@ -11,6 +11,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
+	rkautoLib "github.com/farritpcz/lotto-standalone-admin-api/internal/rkauto"
 )
 
 // =============================================================================
@@ -1243,7 +1245,50 @@ func (h *Handler) ApproveWithdraw(c *gin.Context) {
 	}
 
 	now := time.Now()
-	// ⚠️ ไม่หักเงินซ้ำ — แค่เปลี่ยนสถานะ + บันทึก mode + admin_id
+
+	// ── mode=auto + RKAUTO enabled → สั่งถอนผ่าน RKAUTO ──
+	if req.Mode == "auto" && h.RKAutoClient != nil {
+		rkautoClient, ok2 := h.RKAutoClient.(*rkautoLib.Client)
+		if ok2 {
+			// ดึงข้อมูลบัญชีสมาชิก
+			var bankCode, bankAccountNo string
+			h.DB.Table("withdraw_requests").Select("bank_code, bank_account_number").Where("id = ?", id).Row().Scan(&bankCode, &bankAccountNo)
+
+			// ดึงบัญชีต้นทาง (agent bank account ที่ register กับ RKAUTO)
+			var sourceBankUUID string
+			h.DB.Table("agent_bank_accounts").Select("rkauto_uuid").
+				Where("agent_id = 1 AND rkauto_uuid != '' AND status = 'active'").
+				Limit(1).Row().Scan(&sourceBankUUID)
+
+			if sourceBankUUID != "" && bankAccountNo != "" {
+				txnID := "WD-" + strconv.FormatInt(id, 10) + "-" + strconv.FormatInt(now.Unix(), 10)
+				wdResp, wdErr := rkautoClient.CreateWithdrawal(rkautoLib.CreateWithdrawalRequest{
+					TransactionID:   txnID,
+					BankAccountUUID: sourceBankUUID,
+					ToAccountNo:     bankAccountNo,
+					ToBank:          bankCode,
+					Amount:          amount,
+					Currency:        "THB",
+				})
+
+				if wdErr != nil {
+					// RKAUTO error → ยังคง approve manual แต่ log warning
+					log.Printf("⚠️ RKAUTO withdrawal failed for #%d: %v — falling back to manual", id, wdErr)
+					req.Mode = "manual"
+				} else {
+					// สำเร็จ → บันทึก RKAUTO UUID + transaction_id
+					h.DB.Exec("UPDATE withdraw_requests SET rkauto_uuid = ?, rkauto_transaction_id = ?, rkauto_status = 'processing' WHERE id = ?",
+						wdResp.Data.UUID, txnID, id)
+					log.Printf("✅ RKAUTO withdrawal created: #%d → %s (track: %s)", id, wdResp.Data.UUID, wdResp.Data.TrackID)
+				}
+			} else {
+				log.Printf("⚠️ No RKAUTO source bank for auto withdraw #%d — falling back to manual", id)
+				req.Mode = "manual"
+			}
+		}
+	}
+
+	// อัพเดทสถานะ
 	h.DB.Exec(
 		"UPDATE withdraw_requests SET status = 'approved', approved_at = ?, transfer_mode = ?, approved_by = ? WHERE id = ?",
 		now, req.Mode, adminID, id,
@@ -1700,6 +1745,131 @@ func (h *Handler) GetStaffActivity(c *gin.Context) {
 	var logs []model.ActivityLog
 	h.DB.Where("admin_id = ?", id).Order("created_at DESC").Limit(50).Find(&logs)
 	ok(c, logs)
+}
+
+// =============================================================================
+// RKAUTO — Bank Account Registration
+// =============================================================================
+
+// RegisterBankAccountRKAuto ลงทะเบียนบัญชีกับ RKAUTO
+// POST /api/v1/bank-accounts/:id/register-rkauto
+// Body: { "bank_system": "SMS|BANK|KBIZ", "username": "...", "password": "...",
+//         "mobile_number": "..." (SMS), "bank_code": "..." (BANK) }
+func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	if h.RKAutoClient == nil {
+		fail(c, 400, "RKAUTO ไม่ได้เปิดใช้งาน (set RKAUTO_ENABLED=true)"); return
+	}
+	rkautoClient, _ := h.RKAutoClient.(*rkautoLib.Client)
+	if rkautoClient == nil {
+		fail(c, 500, "RKAUTO client error"); return
+	}
+
+	var req struct {
+		BankSystem   string `json:"bank_system" binding:"required"`   // SMS, BANK, KBIZ
+		Username     string `json:"username" binding:"required"`
+		Password     string `json:"password" binding:"required"`
+		MobileNumber string `json:"mobile_number,omitempty"`          // สำหรับ SMS
+		BankCode     string `json:"bank_code,omitempty"`              // สำหรับ BANK (GSB, TMW)
+		IsDeposit    bool   `json:"is_deposit"`
+		IsWithdraw   bool   `json:"is_withdraw"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
+
+	// ดึงข้อมูลบัญชีจาก DB
+	type BankInfo struct {
+		AccountNumber string
+		AccountName   string
+		BankCode      string
+	}
+	var bank BankInfo
+	h.DB.Table("agent_bank_accounts").Select("account_number, account_name, bank_code").Where("id = ?", id).Scan(&bank)
+	if bank.AccountName == "" {
+		fail(c, 404, "ไม่พบบัญชี"); return
+	}
+
+	// เรียก RKAUTO register
+	registerReq := rkautoLib.RegisterBankAccountRequest{
+		BankSystem:      req.BankSystem,
+		BankAccountName: bank.AccountName,
+		Username:        req.Username,
+		Password:        req.Password,
+		IsDeposit:       req.IsDeposit,
+		IsWithdraw:      req.IsWithdraw,
+	}
+
+	// เพิ่ม fields ตาม bank_system
+	switch req.BankSystem {
+	case "SMS":
+		registerReq.MobileNumber = req.MobileNumber
+	case "BANK":
+		registerReq.BankCode = req.BankCode
+		if registerReq.BankCode == "" {
+			registerReq.BankCode = bank.BankCode
+		}
+		registerReq.BankAccountNo = bank.AccountNumber
+	case "KBIZ":
+		registerReq.BankAccountNo = bank.AccountNumber
+	}
+
+	resp, err := rkautoClient.RegisterBankAccount(registerReq)
+	if err != nil {
+		log.Printf("⚠️ RKAUTO register failed for bank #%d: %v", id, err)
+		fail(c, 500, "RKAUTO register failed: "+err.Error()); return
+	}
+
+	if !resp.Success {
+		fail(c, 400, "RKAUTO: "+resp.Message); return
+	}
+
+	// อัพเดท DB
+	h.DB.Exec(`UPDATE agent_bank_accounts SET
+		rkauto_uuid = ?, rkauto_status = 'registered', bank_system = ?,
+		bank_username = ?, bank_password = ?
+		WHERE id = ?`,
+		resp.Data.UUID, req.BankSystem, req.Username, "***encrypted***", id)
+
+	log.Printf("✅ RKAUTO registered bank #%d → UUID: %s", id, resp.Data.UUID)
+	ok(c, gin.H{"id": id, "rkauto_uuid": resp.Data.UUID, "status": "registered"})
+}
+
+// ActivateBankAccountRKAuto เปิดใช้บัญชีกับ RKAUTO
+// POST /api/v1/bank-accounts/:id/activate-rkauto
+func (h *Handler) ActivateBankAccountRKAuto(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	if h.RKAutoClient == nil { fail(c, 400, "RKAUTO disabled"); return }
+	rkautoClient, _ := h.RKAutoClient.(*rkautoLib.Client)
+
+	var uuid string
+	h.DB.Table("agent_bank_accounts").Select("rkauto_uuid").Where("id = ?", id).Row().Scan(&uuid)
+	if uuid == "" { fail(c, 400, "บัญชีนี้ยังไม่ได้ register กับ RKAUTO"); return }
+
+	_, err := rkautoClient.ActivateBankAccount(uuid)
+	if err != nil { fail(c, 500, "RKAUTO activate failed: "+err.Error()); return }
+
+	h.DB.Exec("UPDATE agent_bank_accounts SET rkauto_status = 'active' WHERE id = ?", id)
+	ok(c, gin.H{"id": id, "rkauto_status": "active"})
+}
+
+// DeactivateBankAccountRKAuto ปิดใช้บัญชีกับ RKAUTO
+// POST /api/v1/bank-accounts/:id/deactivate-rkauto
+func (h *Handler) DeactivateBankAccountRKAuto(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	if h.RKAutoClient == nil { fail(c, 400, "RKAUTO disabled"); return }
+	rkautoClient, _ := h.RKAutoClient.(*rkautoLib.Client)
+
+	var uuid string
+	h.DB.Table("agent_bank_accounts").Select("rkauto_uuid").Where("id = ?", id).Row().Scan(&uuid)
+	if uuid == "" { fail(c, 400, "บัญชีนี้ยังไม่ได้ register กับ RKAUTO"); return }
+
+	_, err := rkautoClient.DeactivateBankAccount(uuid)
+	if err != nil { fail(c, 500, "RKAUTO deactivate failed: "+err.Error()); return }
+
+	h.DB.Exec("UPDATE agent_bank_accounts SET rkauto_status = 'deactivated' WHERE id = ?", id)
+	ok(c, gin.H{"id": id, "rkauto_status": "deactivated"})
 }
 
 // GetAvailablePermissions คืน permissions ทั้งหมดที่ตั้งได้

@@ -151,6 +151,11 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
 			}
 
+			// RKAUTO Bank Account Operations
+			protected.POST("/bank-accounts/:id/register-rkauto", h.RegisterBankAccountRKAuto)
+			protected.POST("/bank-accounts/:id/activate-rkauto", h.ActivateBankAccountRKAuto)
+			protected.POST("/bank-accounts/:id/deactivate-rkauto", h.DeactivateBankAccountRKAuto)
+
 			// ⭐ Auto-Ban Rules — กฎอั้นเลขอัตโนมัติ
 			autoBan := protected.Group("/auto-ban-rules")
 			{
