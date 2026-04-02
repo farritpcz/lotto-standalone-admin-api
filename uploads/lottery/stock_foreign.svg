@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#a855f7"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <circle cx="100" cy="100" r="95" fill="url(#bg)"/>
+  <circle cx="100" cy="100" r="88" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="2"/>
+  <!-- Globe lines -->
+  <circle cx="100" cy="90" r="35" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="1.5"/>
+  <ellipse cx="100" cy="90" rx="18" ry="35" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+  <line x1="65" y1="80" x2="135" y2="80" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+  <line x1="65" y1="100" x2="135" y2="100" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+  <!-- Chart bars -->
+  <rect x="70" y="108" width="10" height="30" rx="2" fill="rgba(255,255,255,0.3)"/>
+  <rect x="85" y="98" width="10" height="40" rx="2" fill="rgba(255,255,255,0.5)"/>
+  <rect x="100" y="88" width="10" height="50" rx="2" fill="rgba(255,255,255,0.7)"/>
+  <rect x="115" y="103" width="10" height="35" rx="2" fill="rgba(255,255,255,0.4)"/>
+  <!-- Text -->
+  <text x="100" y="165" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="700" fill="white">GLOBAL STOCK</text>
+  <text x="100" y="182" text-anchor="middle" font-family="Arial,sans-serif" font-size="10" fill="rgba(255,255,255,0.7)">หวยหุ้นต่างประเทศ</text>
+</svg>

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d6e6e"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+  </defs>
+  <circle cx="100" cy="100" r="95" fill="url(#bg)"/>
+  <circle cx="100" cy="100" r="88" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="2"/>
+  <!-- Target/bullseye -->
+  <circle cx="100" cy="85" r="40" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
+  <circle cx="100" cy="85" r="28" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2"/>
+  <circle cx="100" cy="85" r="16" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2"/>
+  <circle cx="100" cy="85" r="6" fill="white" opacity="0.9"/>
+  <!-- Arrow hitting center -->
+  <line x1="140" y1="55" x2="106" y2="81" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+  <polygon points="104,83 110,77 108,85" fill="white"/>
+  <!-- Lightning bolt = speed -->
+  <text x="60" y="78" font-size="18" fill="rgba(255,255,255,0.6)">&#9889;</text>
+  <!-- Text -->
+  <text x="100" y="148" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" font-weight="800" fill="white">YEEKEE</text>
+  <text x="100" y="165" text-anchor="middle" font-family="Arial,sans-serif" font-size="10" fill="rgba(255,255,255,0.7)">88 รอบ/วัน · Live</text>
+  <!-- Live dot -->
+  <circle cx="100" cy="175" r="4" fill="#ef4444">
+    <animate attributeName="opacity" values="1;0.3;1" dur="1.5s" repeatCount="indefinite"/>
+  </circle>
+</svg>

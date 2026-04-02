@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#2563eb"/>
+    </linearGradient>
+  </defs>
+  <circle cx="100" cy="100" r="95" fill="url(#bg)"/>
+  <circle cx="100" cy="100" r="88" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="2"/>
+  <!-- Chart line going up -->
+  <polyline points="35,140 55,130 70,135 85,110 100,120 115,90 130,100 145,70 165,50"
+    fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Chart dots -->
+  <circle cx="85" cy="110" r="3" fill="white"/>
+  <circle cx="115" cy="90" r="3" fill="white"/>
+  <circle cx="145" cy="70" r="3" fill="white"/>
+  <circle cx="165" cy="50" r="4" fill="#34d399"/>
+  <!-- Arrow up -->
+  <polygon points="165,42 160,52 170,52" fill="#34d399"/>
+  <!-- Text -->
+  <text x="100" y="170" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" font-weight="700" fill="white">SET INDEX</text>
+  <text x="100" y="188" text-anchor="middle" font-family="Arial,sans-serif" font-size="10" fill="rgba(255,255,255,0.7)">หวยหุ้นไทย</text>
+</svg>
