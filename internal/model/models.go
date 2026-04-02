@@ -218,3 +218,25 @@ type YeekeeShoot struct {
 }
 
 func (YeekeeShoot) TableName() string { return "yeekee_shoots" }
+
+// AutoBanRule กฎอั้นเลขอัตโนมัติ
+// table: auto_ban_rules
+type AutoBanRule struct {
+	ID              int64     `gorm:"primaryKey" json:"id"`
+	AgentID         int64     `gorm:"not null;default:1;index" json:"agent_id"`
+	LotteryTypeID   int64     `gorm:"not null;index" json:"lottery_type_id"`
+	BetType         string    `gorm:"size:30;not null" json:"bet_type"`
+	ThresholdAmount float64   `gorm:"type:decimal(15,2);not null" json:"threshold_amount"`
+	Action          string    `gorm:"size:20;not null;default:full_ban" json:"action"`
+	ReducedRate     float64   `gorm:"type:decimal(10,2);default:0" json:"reduced_rate"`
+	Capital         float64   `gorm:"type:decimal(15,2);default:0" json:"capital"`
+	MaxLoss         float64   `gorm:"type:decimal(15,2);default:0" json:"max_loss"`
+	Rate            float64   `gorm:"type:decimal(10,2);default:0" json:"rate"`
+	Status          string    `gorm:"size:20;not null;default:active" json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	// Relations
+	LotteryType *LotteryType `gorm:"foreignKey:LotteryTypeID" json:"lottery_type,omitempty"`
+}
+
+func (AutoBanRule) TableName() string { return "auto_ban_rules" }

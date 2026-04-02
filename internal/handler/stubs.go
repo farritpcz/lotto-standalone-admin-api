@@ -857,6 +857,113 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 }
 
 // =============================================================================
+// ⭐ Auto-Ban Rules — กฎอั้นเลขอัตโนมัติ
+// =============================================================================
+
+// ListAutoBanRules ดูกฎอั้นทั้งหมด (filter by lottery_type_id)
+// GET /api/v1/auto-ban-rules?lottery_type_id=1
+func (h *Handler) ListAutoBanRules(c *gin.Context) {
+	query := h.DB.Model(&model.AutoBanRule{}).Where("status = ?", "active")
+	if lt := c.Query("lottery_type_id"); lt != "" {
+		query = query.Where("lottery_type_id = ?", lt)
+	}
+	var rules []model.AutoBanRule
+	query.Preload("LotteryType").Order("lottery_type_id, bet_type").Find(&rules)
+	ok(c, rules)
+}
+
+// CreateAutoBanRule สร้างกฎอั้น 1 กฎ
+// POST /api/v1/auto-ban-rules
+func (h *Handler) CreateAutoBanRule(c *gin.Context) {
+	var rule model.AutoBanRule
+	if err := c.ShouldBindJSON(&rule); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	rule.Status = "active"
+	rule.CreatedAt = time.Now()
+	rule.UpdatedAt = time.Now()
+	if rule.AgentID == 0 {
+		rule.AgentID = 1
+	}
+	if err := h.DB.Create(&rule).Error; err != nil {
+		fail(c, 500, "failed to create auto-ban rule")
+		return
+	}
+	ok(c, rule)
+}
+
+// BulkCreateAutoBanRules สร้างกฎอั้นหลายกฎพร้อมกัน (จากคำนวณอัตโนมัติ)
+// POST /api/v1/auto-ban-rules/bulk
+// Body: { "rules": [...], "lottery_type_id": 1, "capital": 100000, "max_loss": 20000 }
+func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
+	var req struct {
+		LotteryTypeID int64 `json:"lottery_type_id" binding:"required"`
+		Capital       float64 `json:"capital"`
+		MaxLoss       float64 `json:"max_loss"`
+		Rules         []struct {
+			BetType         string  `json:"bet_type"`
+			ThresholdAmount float64 `json:"threshold_amount"`
+			Action          string  `json:"action"`
+			Rate            float64 `json:"rate"`
+			ReducedRate     float64 `json:"reduced_rate"`
+		} `json:"rules" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+
+	// ลบกฎเก่าของ lottery type นี้ก่อน (soft delete)
+	h.DB.Model(&model.AutoBanRule{}).
+		Where("lottery_type_id = ? AND status = ?", req.LotteryTypeID, "active").
+		Update("status", "inactive")
+
+	// สร้างกฎใหม่ทั้งหมด
+	now := time.Now()
+	created := make([]model.AutoBanRule, 0, len(req.Rules))
+	for _, r := range req.Rules {
+		action := r.Action
+		if action == "" {
+			action = "full_ban"
+		}
+		rule := model.AutoBanRule{
+			AgentID:         1,
+			LotteryTypeID:   req.LotteryTypeID,
+			BetType:         r.BetType,
+			ThresholdAmount: r.ThresholdAmount,
+			Action:          action,
+			ReducedRate:     r.ReducedRate,
+			Capital:         req.Capital,
+			MaxLoss:         req.MaxLoss,
+			Rate:            r.Rate,
+			Status:          "active",
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		h.DB.Create(&rule)
+		created = append(created, rule)
+	}
+
+	ok(c, gin.H{
+		"created_count":   len(created),
+		"lottery_type_id": req.LotteryTypeID,
+		"rules":           created,
+	})
+}
+
+// DeleteAutoBanRule ลบกฎอั้น (soft delete)
+// DELETE /api/v1/auto-ban-rules/:id
+func (h *Handler) DeleteAutoBanRule(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	h.DB.Model(&model.AutoBanRule{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":     "inactive",
+		"updated_at": time.Now(),
+	})
+	ok(c, gin.H{"id": id, "status": "inactive"})
+}
+
+// =============================================================================
 // ⭐ Yeekee Monitoring — ดูรอบ + สถิติยี่กี real-time
 // =============================================================================
 

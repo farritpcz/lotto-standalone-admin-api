@@ -143,6 +143,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
 			}
 
+			// ⭐ Auto-Ban Rules — กฎอั้นเลขอัตโนมัติ
+			autoBan := protected.Group("/auto-ban-rules")
+			{
+				autoBan.GET("", h.ListAutoBanRules)
+				autoBan.POST("", h.CreateAutoBanRule)
+				autoBan.POST("/bulk", h.BulkCreateAutoBanRules) // สร้างหลายกฎพร้อมกัน (จากคำนวณ)
+				autoBan.DELETE("/:id", h.DeleteAutoBanRule)
+			}
+
 			// ⭐ Yeekee — monitoring รอบยี่กี real-time
 			yeekee := protected.Group("/yeekee")
 			{
