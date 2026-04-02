@@ -10,6 +10,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -88,6 +89,19 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) GetDashboard(c *gin.Context) {
+	// ⚠️ Redis cache 60 วินาที — ลด DB load สำหรับ dashboard ที่เรียกบ่อย
+	ctx := c.Request.Context()
+	cacheKey := "admin:dashboard:" + time.Now().Format("2006-01-02")
+
+	if h.Redis != nil {
+		cached, err := h.Redis.Get(ctx, cacheKey).Result()
+		if err == nil {
+			// ส่ง cached JSON กลับตรงๆ
+			c.Data(200, "application/json", []byte(cached))
+			return
+		}
+	}
+
 	var stats struct {
 		TotalMembers  int64   `json:"total_members"`
 		ActiveMembers int64   `json:"active_members"`
@@ -97,14 +111,24 @@ func (h *Handler) GetDashboard(c *gin.Context) {
 		OpenRounds    int64   `json:"open_rounds"`
 	}
 
-	today := time.Now().Format("2006-01-02")
+	// ⚠️ ใช้ range query แทน DATE(created_at) — ให้ MySQL ใช้ index ได้
+	todayStart := time.Now().Truncate(24 * time.Hour)
+	todayEnd := todayStart.Add(24 * time.Hour)
 
 	h.DB.Model(&model.Member{}).Count(&stats.TotalMembers)
 	h.DB.Model(&model.Member{}).Where("status = ?", "active").Count(&stats.ActiveMembers)
-	h.DB.Model(&model.Bet{}).Where("DATE(created_at) = ?", today).Count(&stats.TotalBets)
-	h.DB.Model(&model.Bet{}).Where("DATE(created_at) = ?", today).Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalAmount)
-	h.DB.Model(&model.Bet{}).Where("DATE(created_at) = ? AND status = ?", today, "won").Select("COALESCE(SUM(win_amount), 0)").Scan(&stats.TotalWin)
+	h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ?", todayStart, todayEnd).Count(&stats.TotalBets)
+	h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ?", todayStart, todayEnd).
+		Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalAmount)
+	h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ? AND status = ?", todayStart, todayEnd, "won").
+		Select("COALESCE(SUM(win_amount), 0)").Scan(&stats.TotalWin)
 	h.DB.Model(&model.LotteryRound{}).Where("status = ?", "open").Count(&stats.OpenRounds)
+
+	// Cache ใน Redis 60 วินาที
+	if h.Redis != nil {
+		jsonBytes, _ := json.Marshal(gin.H{"success": true, "data": stats})
+		h.Redis.Set(ctx, cacheKey, string(jsonBytes), 60*time.Second)
+	}
 
 	ok(c, stats)
 }

@@ -48,6 +48,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
@@ -57,7 +58,8 @@ import (
 type Handler struct {
 	AdminJWTSecret      string
 	AdminJWTExpiryHours int
-	DB                  *gorm.DB // inject จาก main.go — ⭐ share DB กับ member-api (#3)
+	DB                  *gorm.DB         // inject จาก main.go — ⭐ share DB กับ member-api (#3)
+	Redis               *redis.Client    // Redis สำหรับ cache dashboard stats
 }
 
 // NewHandler สร้าง Handler instance

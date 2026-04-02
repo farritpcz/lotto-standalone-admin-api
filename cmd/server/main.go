@@ -19,6 +19,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/config"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/handler"
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
@@ -64,8 +66,17 @@ func main() {
 	// Global rate limit — 10 req/sec, burst 30 (ป้องกัน DoS)
 	r.Use(mw.RateLimit(10, 30))
 
+	// Redis สำหรับ cache dashboard stats
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr(),
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+	log.Println("✅ Redis connected:", cfg.RedisAddr())
+
 	h := handler.NewHandler(cfg.AdminJWTSecret, cfg.AdminJWTExpiryHours)
-	h.DB = db // inject DB ให้ handler ใช้
+	h.DB = db
+	h.Redis = rdb
 	h.SetupRoutes(r)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
