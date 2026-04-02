@@ -78,6 +78,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 	{
 		// === Public ===
 		api.POST("/auth/login", h.AdminLogin)
+		api.GET("/public/contact-channels", h.ListPublicContactChannels)
 
 		// === Protected (ต้อง Admin JWT + Audit Log) ===
 		protected := api.Group("")
@@ -150,6 +151,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				withdrawals.GET("", h.ListWithdrawRequests)
 				withdrawals.PUT("/:id/approve", h.ApproveWithdraw)
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
+			}
+
+			// Contact Channels — ช่องทางติดต่อ
+			contacts := protected.Group("/contact-channels")
+			{
+				contacts.GET("", h.ListContactChannels)
+				contacts.POST("", h.CreateContactChannel)
+				contacts.PUT("/:id", h.UpdateContactChannel)
+				contacts.DELETE("/:id", h.DeleteContactChannel)
 			}
 
 			// Agent Bank Accounts — CRUD
