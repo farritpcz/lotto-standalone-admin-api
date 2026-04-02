@@ -154,6 +154,9 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
 			}
 
+			// Upload — อัพโหลดรูปภาพ
+			protected.POST("/upload", h.UploadFile)
+
 			// Contact Channels — ช่องทางติดต่อ
 			contacts := protected.Group("/contact-channels")
 			{
@@ -219,6 +222,9 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			}
 		}
 	}
+
+	// Static files — serve uploaded images
+	r.Static("/uploads", "./uploads")
 
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
