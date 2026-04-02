@@ -952,6 +952,37 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 	})
 }
 
+// UpdateAutoBanRule แก้ไขกฎอั้น
+// PUT /api/v1/auto-ban-rules/:id
+func (h *Handler) UpdateAutoBanRule(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var rule model.AutoBanRule
+	if err := h.DB.First(&rule, id).Error; err != nil {
+		fail(c, 404, "rule not found")
+		return
+	}
+	var req struct {
+		ThresholdAmount *float64 `json:"threshold_amount"`
+		Action          *string  `json:"action"`
+		ReducedRate     *float64 `json:"reduced_rate"`
+		BetType         *string  `json:"bet_type"`
+		Status          *string  `json:"status"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	updates := map[string]interface{}{"updated_at": time.Now()}
+	if req.ThresholdAmount != nil { updates["threshold_amount"] = *req.ThresholdAmount }
+	if req.Action != nil { updates["action"] = *req.Action }
+	if req.ReducedRate != nil { updates["reduced_rate"] = *req.ReducedRate }
+	if req.BetType != nil { updates["bet_type"] = *req.BetType }
+	if req.Status != nil { updates["status"] = *req.Status }
+	h.DB.Model(&rule).Updates(updates)
+	h.DB.First(&rule, id)
+	ok(c, rule)
+}
+
 // DeleteAutoBanRule ลบกฎอั้น (soft delete)
 // DELETE /api/v1/auto-ban-rules/:id
 func (h *Handler) DeleteAutoBanRule(c *gin.Context) {

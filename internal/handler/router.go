@@ -148,7 +148,8 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			{
 				autoBan.GET("", h.ListAutoBanRules)
 				autoBan.POST("", h.CreateAutoBanRule)
-				autoBan.POST("/bulk", h.BulkCreateAutoBanRules) // สร้างหลายกฎพร้อมกัน (จากคำนวณ)
+				autoBan.POST("/bulk", h.BulkCreateAutoBanRules)
+				autoBan.PUT("/:id", h.UpdateAutoBanRule)
 				autoBan.DELETE("/:id", h.DeleteAutoBanRule)
 			}
 
