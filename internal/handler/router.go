@@ -75,9 +75,10 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 		// === Public ===
 		api.POST("/auth/login", h.AdminLogin)
 
-		// === Protected (ต้อง Admin JWT) ===
+		// === Protected (ต้อง Admin JWT + Audit Log) ===
 		protected := api.Group("")
 		protected.Use(mw.AdminJWTAuth(h.AdminJWTSecret))
+		protected.Use(mw.AuditLog(h.DB))
 		{
 			// Dashboard
 			protected.GET("/dashboard", h.GetDashboard)
@@ -135,6 +136,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				deposits.GET("", h.ListDepositRequests)
 				deposits.PUT("/:id/approve", h.ApproveDeposit)
 				deposits.PUT("/:id/reject", h.RejectDeposit)
+				deposits.PUT("/:id/cancel", h.CancelDeposit)
 			}
 
 			// Withdraw Requests — อนุมัติ/ปฏิเสธคำขอถอนเงิน

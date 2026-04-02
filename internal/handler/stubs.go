@@ -805,46 +805,132 @@ func (h *Handler) ListDepositRequests(c *gin.Context) {
 	paginated(c, rows, total, page, perPage)
 }
 
+// ApproveDeposit อนุมัติคำขอฝากเงิน — เพิ่มเงินให้สมาชิก
+// PUT /api/v1/deposits/:id/approve
 func (h *Handler) ApproveDeposit(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	adminID := middleware.GetAdminID(c)
 
 	// ดึง request
 	var amount float64
 	var memberID int64
 	var reqStatus string
-	h.DB.Table("deposit_requests").Select("amount, member_id, status").Where("id = ?", id).Row().Scan(&amount, &memberID, &reqStatus)
+	row := h.DB.Table("deposit_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
+	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
+		fail(c, 404, "ไม่พบคำขอ"); return
+	}
 	if reqStatus != "pending" {
-		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ"); return
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
 	}
 
 	tx := h.DB.Begin()
 
-	// อัพเดท status → approved
 	now := time.Now()
-	tx.Exec("UPDATE deposit_requests SET status = 'approved', approved_at = ? WHERE id = ?", now, id)
+	tx.Exec("UPDATE deposit_requests SET status = 'approved', approved_at = ?, approved_by = ? WHERE id = ?", now, adminID, id)
 
 	// เพิ่มเงินให้สมาชิก
 	var balanceBefore float64
-	h.DB.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceBefore)
+	tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceBefore)
 	tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", amount, memberID)
 
 	// สร้าง transaction record
 	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
 		VALUES (?, 'deposit', ?, ?, ?, 'deposit_request', ?, ?)`,
-		memberID, amount, balanceBefore, balanceBefore+amount, "อนุมัติโดยแอดมิน", now)
+		memberID, amount, balanceBefore, balanceBefore+amount, "อนุมัติโดยแอดมิน #"+strconv.FormatInt(adminID, 10), now)
 
 	tx.Commit()
 	ok(c, gin.H{"id": id, "status": "approved", "amount": amount, "member_id": memberID})
 }
 
+// RejectDeposit ปฏิเสธคำขอฝากเงิน
+// PUT /api/v1/deposits/:id/reject
+// Body (optional): { "reason": "เหตุผล" }
 func (h *Handler) RejectDeposit(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	h.DB.Exec("UPDATE deposit_requests SET status = 'rejected', approved_at = ? WHERE id = ? AND status = 'pending'", time.Now(), id)
-	ok(c, gin.H{"id": id, "status": "rejected"})
+	adminID := middleware.GetAdminID(c)
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	c.ShouldBindJSON(&req)
+	if req.Reason == "" {
+		req.Reason = "ปฏิเสธโดยแอดมิน"
+	}
+
+	now := time.Now()
+	result := h.DB.Exec(
+		"UPDATE deposit_requests SET status = 'rejected', approved_at = ?, reject_reason = ?, approved_by = ? WHERE id = ? AND status = 'pending'",
+		now, req.Reason, adminID, id,
+	)
+	if result.RowsAffected == 0 {
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ"); return
+	}
+
+	ok(c, gin.H{"id": id, "status": "rejected", "reason": req.Reason})
+}
+
+// CancelDeposit ยกเลิกรายการฝากที่อนุมัติแล้ว (reverse — หักเงินคืน)
+// PUT /api/v1/deposits/:id/cancel
+// Body (optional): { "reason": "เหตุผล" }
+func (h *Handler) CancelDeposit(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	adminID := middleware.GetAdminID(c)
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	c.ShouldBindJSON(&req)
+	if req.Reason == "" {
+		req.Reason = "ยกเลิกโดยแอดมิน"
+	}
+
+	// ดึงข้อมูลคำขอ
+	var amount float64
+	var memberID int64
+	var reqStatus string
+	row := h.DB.Table("deposit_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
+	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
+		fail(c, 404, "ไม่พบคำขอ"); return
+	}
+	if reqStatus != "approved" {
+		fail(c, 400, "ยกเลิกได้เฉพาะคำขอที่อนุมัติแล้ว (สถานะปัจจุบัน: "+reqStatus+")"); return
+	}
+
+	tx := h.DB.Begin()
+	now := time.Now()
+
+	// อัพเดท status → cancelled
+	tx.Exec("UPDATE deposit_requests SET status = 'cancelled', reject_reason = ?, approved_by = ? WHERE id = ?",
+		req.Reason, adminID, id)
+
+	// หักเงินคืน (atomic)
+	debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", amount, memberID, amount)
+	if debitResult.RowsAffected == 0 {
+		tx.Rollback()
+		fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืน"); return
+	}
+
+	// ดึง balance ล่าสุด
+	var balanceAfter float64
+	tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
+
+	// บันทึก transaction
+	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		VALUES (?, 'admin_debit', ?, ?, ?, 'deposit_cancel', ?, ?)`,
+		memberID, -amount, balanceAfter+amount, balanceAfter,
+		"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
+
+	tx.Commit()
+	ok(c, gin.H{"id": id, "status": "cancelled", "amount": amount, "member_id": memberID, "reason": req.Reason})
 }
 
 // =============================================================================
 // Withdraw Requests — อนุมัติ/ปฏิเสธคำขอถอนเงิน
+//
+// ⚠️ IMPORTANT: member-api หักเงินตอนสร้างคำขอแล้ว (atomic debit)
+// ดังนั้น:
+// - ApproveWithdraw: ไม่ต้องหักเงินอีก (แค่เปลี่ยนสถานะ + บันทึก mode)
+// - RejectWithdraw: ต้องคืนเงินให้สมาชิก (เพราะหักไปแล้วตอนสร้างคำขอ)
 // =============================================================================
 
 func (h *Handler) ListWithdrawRequests(c *gin.Context) {
@@ -878,45 +964,106 @@ func (h *Handler) ListWithdrawRequests(c *gin.Context) {
 	paginated(c, rows, total, page, perPage)
 }
 
+// ApproveWithdraw อนุมัติคำขอถอนเงิน
+// PUT /api/v1/withdrawals/:id/approve
+// Body: { "mode": "auto" | "manual" }
+//
+// ⚠️ ไม่หักเงินอีก — member-api หักไปแล้วตอนสร้างคำขอ
+// แค่เปลี่ยนสถานะ → approved + บันทึก mode การโอน
 func (h *Handler) ApproveWithdraw(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	adminID := middleware.GetAdminID(c)
+
+	var req struct {
+		Mode string `json:"mode"` // "auto" = โอนอัตโนมัติ, "manual" = โอนเอง
+	}
+	c.ShouldBindJSON(&req)
+	if req.Mode == "" {
+		req.Mode = "manual"
+	}
 
 	var amount float64
 	var memberID int64
 	var reqStatus string
-	h.DB.Table("withdraw_requests").Select("amount, member_id, status").Where("id = ?", id).Row().Scan(&amount, &memberID, &reqStatus)
+	row := h.DB.Table("withdraw_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
+	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
+		fail(c, 404, "ไม่พบคำขอ"); return
+	}
 	if reqStatus != "pending" {
-		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ"); return
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
 	}
 
-	// เช็คยอดเงินพอ
-	var balance float64
-	h.DB.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
-	if balance < amount {
-		fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอ"); return
+	now := time.Now()
+	// ⚠️ ไม่หักเงินซ้ำ — แค่เปลี่ยนสถานะ + บันทึก mode + admin_id
+	h.DB.Exec(
+		"UPDATE withdraw_requests SET status = 'approved', approved_at = ?, transfer_mode = ?, approved_by = ? WHERE id = ?",
+		now, req.Mode, adminID, id,
+	)
+
+	ok(c, gin.H{"id": id, "status": "approved", "mode": req.Mode, "amount": amount, "member_id": memberID})
+}
+
+// RejectWithdraw ปฏิเสธคำขอถอนเงิน
+// PUT /api/v1/withdrawals/:id/reject
+// Body: { "refund": true/false, "reason": "เหตุผล" }
+//
+// ⚠️ refund=true (default) → คืนเงินให้สมาชิก (เพราะหักไปแล้วตอนสร้างคำขอ)
+// ⚠️ refund=false → ไม่คืนเงิน (กรณีสมาชิกทุจริต)
+func (h *Handler) RejectWithdraw(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	adminID := middleware.GetAdminID(c)
+
+	var req struct {
+		Refund *bool  `json:"refund"` // default true — คืนเงิน
+		Reason string `json:"reason"`
+	}
+	c.ShouldBindJSON(&req)
+	if req.Reason == "" {
+		req.Reason = "ปฏิเสธโดยแอดมิน"
+	}
+	// default: คืนเงิน
+	shouldRefund := true
+	if req.Refund != nil {
+		shouldRefund = *req.Refund
+	}
+
+	var amount float64
+	var memberID int64
+	var reqStatus string
+	row := h.DB.Table("withdraw_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
+	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
+		fail(c, 404, "ไม่พบคำขอ"); return
+	}
+	if reqStatus != "pending" {
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
 	}
 
 	tx := h.DB.Begin()
-
 	now := time.Now()
-	tx.Exec("UPDATE withdraw_requests SET status = 'approved', approved_at = ? WHERE id = ?", now, id)
 
-	// หักเงินสมาชิก
-	tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ?", amount, memberID)
+	// อัพเดท status → rejected
+	tx.Exec(
+		"UPDATE withdraw_requests SET status = 'rejected', approved_at = ?, reject_reason = ?, approved_by = ? WHERE id = ?",
+		now, req.Reason, adminID, id,
+	)
 
-	// สร้าง transaction record
-	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-		VALUES (?, 'withdraw', ?, ?, ?, 'withdraw_request', ?, ?)`,
-		memberID, -amount, balance, balance-amount, "อนุมัติโดยแอดมิน", now)
+	// คืนเงินให้สมาชิก (ถ้า refund=true)
+	if shouldRefund {
+		tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", amount, memberID)
+
+		// ดึง balance ล่าสุด
+		var balanceAfter float64
+		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
+
+		// บันทึก transaction คืนเงิน
+		tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (?, 'refund', ?, ?, ?, 'withdraw_reject', ?, ?)`,
+			memberID, amount, balanceAfter-amount, balanceAfter,
+			"คืนเงินถอน #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
+	}
 
 	tx.Commit()
-	ok(c, gin.H{"id": id, "status": "approved", "amount": amount, "member_id": memberID})
-}
-
-func (h *Handler) RejectWithdraw(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	h.DB.Exec("UPDATE withdraw_requests SET status = 'rejected', approved_at = ? WHERE id = ? AND status = 'pending'", time.Now(), id)
-	ok(c, gin.H{"id": id, "status": "rejected"})
+	ok(c, gin.H{"id": id, "status": "rejected", "refund": shouldRefund, "reason": req.Reason, "amount": amount})
 }
 
 // =============================================================================

@@ -240,3 +240,18 @@ type AutoBanRule struct {
 }
 
 func (AutoBanRule) TableName() string { return "auto_ban_rules" }
+
+// ActivityLog บันทึกทุก admin action (audit trail)
+// table: activity_logs
+type ActivityLog struct {
+	ID          int64     `gorm:"primaryKey" json:"id"`
+	AdminID     int64     `gorm:"index;not null" json:"admin_id"`
+	Method      string    `gorm:"size:10;not null" json:"method"`
+	Path        string    `gorm:"size:255;not null" json:"path"`
+	RequestBody string    `gorm:"type:text" json:"request_body,omitempty"`
+	StatusCode  int       `gorm:"not null" json:"status_code"`
+	IPAddress   string    `gorm:"size:45" json:"ip_address"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (ActivityLog) TableName() string { return "activity_logs" }
