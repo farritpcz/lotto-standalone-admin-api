@@ -1767,13 +1767,15 @@ func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 	}
 
 	var req struct {
-		BankSystem   string `json:"bank_system" binding:"required"`   // SMS, BANK, KBIZ
-		Username     string `json:"username" binding:"required"`
-		Password     string `json:"password" binding:"required"`
-		MobileNumber string `json:"mobile_number,omitempty"`          // สำหรับ SMS
-		BankCode     string `json:"bank_code,omitempty"`              // สำหรับ BANK (GSB, TMW)
-		IsDeposit    bool   `json:"is_deposit"`
-		IsWithdraw   bool   `json:"is_withdraw"`
+		BankSystem    string `json:"bank_system" binding:"required"`   // SMS, BANK, KBIZ
+		Username      string `json:"username"`
+		Password      string `json:"password"`
+		MobileNumber  string `json:"mobile_number,omitempty"`
+		BankCode      string `json:"bank_code,omitempty"`
+		IsDeposit     bool   `json:"is_deposit"`
+		IsWithdraw    bool   `json:"is_withdraw"`
+		RKAutoToken1  string `json:"rkauto_token1,omitempty"`  // Token จากการเจน RKAUTO (ไม่เก็บ DB)
+		RKAutoToken2  string `json:"rkauto_token2,omitempty"`  // Token ตัวที่ 2 (ไม่เก็บ DB)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error()); return
@@ -1791,12 +1793,22 @@ func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 		fail(c, 404, "ไม่พบบัญชี"); return
 	}
 
+	// ⚠️ ใช้ RKAUTO tokens (จากการเจน) เป็น username/password ถ้ามี
+	username := req.Username
+	password := req.Password
+	if req.RKAutoToken1 != "" {
+		username = req.RKAutoToken1
+	}
+	if req.RKAutoToken2 != "" {
+		password = req.RKAutoToken2
+	}
+
 	// เรียก RKAUTO register
 	registerReq := rkautoLib.RegisterBankAccountRequest{
 		BankSystem:      req.BankSystem,
 		BankAccountName: bank.AccountName,
-		Username:        req.Username,
-		Password:        req.Password,
+		Username:        username,
+		Password:        password,
 		IsDeposit:       req.IsDeposit,
 		IsWithdraw:      req.IsWithdraw,
 	}
