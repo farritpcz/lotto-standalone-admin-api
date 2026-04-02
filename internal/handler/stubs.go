@@ -1352,3 +1352,85 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 
 	ok(c, stats)
 }
+
+// =============================================================================
+// Staff (Admin Users) — CRUD + permissions
+// =============================================================================
+
+// ListStaff รายการ admin ทั้งหมด
+func (h *Handler) ListStaff(c *gin.Context) {
+	var admins []model.Admin
+	h.DB.Where("status != ?", "deleted").Order("created_at DESC").Find(&admins)
+	ok(c, admins)
+}
+
+// CreateStaff เพิ่ม admin ใหม่
+func (h *Handler) CreateStaff(c *gin.Context) {
+	var req struct {
+		Username    string `json:"username" binding:"required,min=3,max=50"`
+		Password    string `json:"password" binding:"required,min=6,max=100"`
+		Name        string `json:"name" binding:"required,max=100"`
+		Role        string `json:"role"`
+		Permissions string `json:"permissions"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if req.Role == "" { req.Role = "admin" }
+
+	var count int64
+	h.DB.Model(&model.Admin{}).Where("username = ?", req.Username).Count(&count)
+	if count > 0 { fail(c, 400, "username นี้ถูกใช้แล้ว"); return }
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil { fail(c, 500, "failed to hash password"); return }
+
+	admin := model.Admin{
+		Username: req.Username, PasswordHash: string(hash),
+		Name: req.Name, Role: req.Role, Permissions: req.Permissions, Status: "active",
+	}
+	if err := h.DB.Create(&admin).Error; err != nil { fail(c, 500, "failed to create admin"); return }
+	ok(c, admin)
+}
+
+// UpdateStaff แก้ไข admin
+func (h *Handler) UpdateStaff(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var admin model.Admin
+	if err := h.DB.First(&admin, id).Error; err != nil { fail(c, 404, "admin not found"); return }
+
+	var req struct {
+		Name        string `json:"name"`
+		Role        string `json:"role"`
+		Permissions string `json:"permissions"`
+		Password    string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+
+	if req.Name != "" { admin.Name = req.Name }
+	if req.Role != "" { admin.Role = req.Role }
+	if req.Permissions != "" { admin.Permissions = req.Permissions }
+	if req.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil { fail(c, 500, "failed to hash password"); return }
+		admin.PasswordHash = string(hash)
+	}
+	h.DB.Save(&admin)
+	ok(c, admin)
+}
+
+// UpdateStaffStatus เปลี่ยนสถานะ admin
+func (h *Handler) UpdateStaffStatus(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var req struct { Status string `json:"status" binding:"required"` }
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	h.DB.Model(&model.Admin{}).Where("id = ?", id).Update("status", req.Status)
+	ok(c, gin.H{"id": id, "status": req.Status})
+}
+
+// DeleteStaff ลบ admin (soft delete)
+func (h *Handler) DeleteStaff(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	adminID := middleware.GetAdminID(c)
+	if id == adminID { fail(c, 400, "ไม่สามารถลบตัวเองได้"); return }
+	h.DB.Model(&model.Admin{}).Where("id = ?", id).Update("status", "deleted")
+	ok(c, gin.H{"id": id, "status": "deleted"})
+}

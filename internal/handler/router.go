@@ -166,6 +166,16 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				yeekee.GET("/stats", h.GetYeekeeStats)              // สถิติวันนี้
 			}
 
+			// Staff (Admin Users) — CRUD + permissions
+			staff := protected.Group("/staff")
+			{
+				staff.GET("", h.ListStaff)
+				staff.POST("", h.CreateStaff)
+				staff.PUT("/:id", h.UpdateStaff)
+				staff.PUT("/:id/status", h.UpdateStaffStatus)
+				staff.DELETE("/:id", h.DeleteStaff)
+			}
+
 			// Affiliate Settings — commission rates + withdrawal conditions
 			affiliate := protected.Group("/affiliate")
 			{

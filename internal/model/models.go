@@ -12,7 +12,8 @@ type Admin struct {
 	Username     string     `gorm:"size:50;uniqueIndex;not null" json:"username"`
 	PasswordHash string     `gorm:"size:255;not null" json:"-"`
 	Name         string     `gorm:"size:100" json:"name"`
-	Role         string     `gorm:"size:20;not null;default:admin" json:"role"`
+	Role         string     `gorm:"size:20;not null;default:admin" json:"role"`   // admin, operator, viewer
+	Permissions  string     `gorm:"type:text" json:"permissions"`                 // JSON array เช่น ["members","deposits","results"]
 	Status       string     `gorm:"size:20;not null;default:active" json:"status"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
 	CreatedAt    time.Time  `json:"created_at"`
