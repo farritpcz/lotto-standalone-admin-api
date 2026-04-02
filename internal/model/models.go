@@ -69,6 +69,7 @@ type LotteryType struct {
 	Code         string    `gorm:"size:30;uniqueIndex;not null" json:"code"`
 	Category     string    `gorm:"size:30;not null;default:government" json:"category"`
 	Description  string    `gorm:"type:text" json:"description"`
+	ImageURL     string    `gorm:"column:image_url;size:500" json:"image_url"`
 	Icon         string    `gorm:"size:50" json:"icon"`
 	IsAutoResult bool      `gorm:"column:is_auto_result;not null;default:false" json:"is_auto_result"`
 	Status       string    `gorm:"size:20;not null;default:active" json:"status"`

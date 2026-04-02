@@ -526,6 +526,21 @@ func (h *Handler) UpdateLottery(c *gin.Context) {
 	ok(c, lt)
 }
 
+// UpdateLotteryImage อัพเดทรูปประเภทหวย
+// PUT /api/v1/lotteries/:id/image
+// Body: { "image_url": "https://..." }
+func (h *Handler) UpdateLotteryImage(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	var req struct {
+		ImageURL string `json:"image_url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
+	h.DB.Model(&model.LotteryType{}).Where("id = ?", id).Update("image_url", req.ImageURL)
+	ok(c, gin.H{"id": id, "image_url": req.ImageURL})
+}
+
 // =============================================================================
 // Rounds
 // =============================================================================

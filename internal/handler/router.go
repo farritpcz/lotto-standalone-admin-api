@@ -100,6 +100,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.GET("/lotteries", h.ListLotteries)
 			protected.POST("/lotteries", h.CreateLottery)
 			protected.PUT("/lotteries/:id", h.UpdateLottery)
+			protected.PUT("/lotteries/:id/image", h.UpdateLotteryImage)
 
 			// Rounds
 			protected.GET("/rounds", h.ListRounds)
