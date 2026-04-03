@@ -1035,9 +1035,17 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req map[string]string
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 	for key, value := range req {
-		h.DB.Model(&model.Setting{}).Where("`key` = ?", key).Update("value", value)
+		// ⭐ Upsert: ถ้ามี key → update, ถ้ายังไม่มี → insert
+		var existing model.Setting
+		if err := h.DB.Where("`key` = ?", key).First(&existing).Error; err != nil {
+			// ไม่มี → สร้างใหม่
+			h.DB.Create(&model.Setting{Key: key, Value: value})
+		} else {
+			// มีอยู่แล้ว → update value
+			h.DB.Model(&existing).Update("value", value)
+		}
 	}
-	ok(c, gin.H{"updated": req})
+	ok(c, gin.H{"updated": len(req)})
 }
 
 // =============================================================================
