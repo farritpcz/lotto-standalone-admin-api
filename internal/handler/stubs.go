@@ -1076,6 +1076,7 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 	// หา agent_id จาก JWT (ใช้ default 1 สำหรับ standalone)
 	agentID := int64(1)
 
+	// ⭐ Upsert: หาทุก status (รวม inactive) — ป้องกัน duplicate
 	var existing model.AffiliateSettings
 	query := h.DB.Where("agent_id = ?", agentID)
 	if req.LotteryTypeID == nil {
@@ -1085,7 +1086,7 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 	}
 
 	if err := query.First(&existing).Error; err != nil {
-		// สร้างใหม่
+		// ไม่มีเลย → สร้างใหม่
 		setting := model.AffiliateSettings{
 			AgentID:        agentID,
 			LotteryTypeID:  req.LotteryTypeID,
@@ -1099,11 +1100,12 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 		return
 	}
 
-	// อัพเดท
+	// มีอยู่แล้ว → อัพเดท (reactivate ถ้าเป็น inactive)
 	updates := map[string]interface{}{
 		"commission_rate": req.CommissionRate,
 		"withdrawal_min":  req.WithdrawalMin,
 		"withdrawal_note": req.WithdrawalNote,
+		"status":          "active",
 	}
 	h.DB.Model(&existing).Updates(updates)
 	h.DB.Preload("LotteryType").First(&existing, existing.ID)
