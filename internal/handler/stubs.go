@@ -1058,7 +1058,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 func (h *Handler) GetAffiliateSettings(c *gin.Context) {
 	var settings []model.AffiliateSettings
-	h.DB.Preload("LotteryType").Order("lottery_type_id ASC").Find(&settings)
+	h.DB.Preload("LotteryType").Where("status = ?", "active").Order("lottery_type_id ASC").Find(&settings)
 	ok(c, settings)
 }
 
