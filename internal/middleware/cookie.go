@@ -24,7 +24,7 @@ func SetAdminTokenCookie(c *gin.Context, token string, maxAge int, cfg CookieCon
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_token",
 		Value:    token,
-		Path:     "/api",
+		Path:     "/",
 		Domain:   cfg.Domain,
 		MaxAge:   maxAge,
 		HttpOnly: true,
@@ -38,7 +38,7 @@ func ClearAdminTokenCookie(c *gin.Context, cfg CookieConfig) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_token",
 		Value:    "",
-		Path:     "/api",
+		Path:     "/",
 		Domain:   cfg.Domain,
 		MaxAge:   -1,
 		HttpOnly: true,

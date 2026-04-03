@@ -62,7 +62,7 @@ func SetCSRFCookie(c *gin.Context, cfg CookieConfig) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_csrf_token",
 		Value:    token,
-		Path:     "/api",
+		Path:     "/",
 		Domain:   cfg.Domain,
 		MaxAge:   86400, // 1 วัน (admin session สั้นกว่า)
 		HttpOnly: false, // ⭐ Frontend ต้องอ่านได้
@@ -76,7 +76,7 @@ func ClearCSRFCookie(c *gin.Context, cfg CookieConfig) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_csrf_token",
 		Value:    "",
-		Path:     "/api",
+		Path:     "/",
 		Domain:   cfg.Domain,
 		MaxAge:   -1,
 		HttpOnly: false,
