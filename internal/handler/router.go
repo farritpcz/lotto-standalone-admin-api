@@ -60,6 +60,7 @@ type Handler struct {
 	AdminJWTExpiryHours int
 	CookieDomain        string           // httpOnly cookie domain
 	CookieSecure        bool             // httpOnly cookie secure flag
+	Env                 string           // "development" or "production"
 	DB                  *gorm.DB         // inject จาก main.go — ⭐ share DB กับ member-api (#3)
 	Redis               *redis.Client    // Redis สำหรับ cache dashboard stats
 	RKAutoClient        interface{}      // *rkauto.Client (nil = disabled)
@@ -87,7 +88,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 		// === Protected (ต้อง Admin JWT + CSRF + Audit Log) ===
 		protected := api.Group("")
 		protected.Use(mw.AdminJWTAuth(h.AdminJWTSecret))
-		protected.Use(mw.CSRFProtect())
+		protected.Use(mw.CSRFProtect(h.Env))
 		protected.Use(mw.AuditLog(h.DB))
 		{
 			// Dashboard

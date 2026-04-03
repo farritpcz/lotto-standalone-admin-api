@@ -79,6 +79,7 @@ func main() {
 	h := handler.NewHandler(cfg.AdminJWTSecret, cfg.AdminJWTExpiryHours)
 	h.CookieDomain = cfg.CookieDomain
 	h.CookieSecure = cfg.CookieSecure
+	h.Env = cfg.Env
 	h.DB = db
 	h.Redis = rdb
 	h.EncryptionKey = cfg.RKAutoEncryptionKey

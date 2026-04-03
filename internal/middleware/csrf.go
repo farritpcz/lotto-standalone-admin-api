@@ -12,8 +12,13 @@ import (
 )
 
 // CSRFProtect middleware ตรวจสอบ CSRF token สำหรับ state-changing requests
-func CSRFProtect() gin.HandlerFunc {
+// ⭐ env=development → skip CSRF (เปิดเฉพาะ production)
+func CSRFProtect(env ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if len(env) > 0 && env[0] != "production" {
+			c.Next()
+			return
+		}
 		method := c.Request.Method
 		if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
 			c.Next()
