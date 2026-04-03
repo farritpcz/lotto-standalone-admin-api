@@ -282,3 +282,37 @@ type ActivityLog struct {
 }
 
 func (ActivityLog) TableName() string { return "activity_logs" }
+
+// ShareTemplate ข้อความสำเร็จรูปสำหรับแชร์ลิงก์เชิญ (admin สร้าง)
+type ShareTemplate struct {
+	ID        int64     `gorm:"primaryKey" json:"id"`
+	AgentID   int64     `gorm:"not null;index" json:"agent_id"`
+	Name      string    `gorm:"size:100;not null" json:"name"`
+	Content   string    `gorm:"type:text;not null" json:"content"` // placeholder: {link}, {code}, {username}
+	Platform  string    `gorm:"size:30;not null;default:all" json:"platform"`
+	SortOrder int       `gorm:"not null;default:0" json:"sort_order"`
+	Status    string    `gorm:"size:20;not null;default:active" json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (ShareTemplate) TableName() string { return "share_templates" }
+
+// CommissionAdjustment admin ปรับค่าคอม (เพิ่ม/ลด/ยกเลิก) + audit log
+type CommissionAdjustment struct {
+	ID            int64     `gorm:"primaryKey" json:"id"`
+	AgentID       int64     `gorm:"not null;index" json:"agent_id"`
+	MemberID      int64     `gorm:"not null;index" json:"member_id"`
+	AdminID       int64     `gorm:"not null" json:"admin_id"`
+	Type          string    `gorm:"size:20;not null" json:"type"` // add, deduct, cancel
+	Amount        float64   `gorm:"type:decimal(15,2);not null" json:"amount"`
+	Reason        string    `gorm:"type:text;not null" json:"reason"`
+	CommissionID  *int64    `json:"commission_id,omitempty"`
+	BalanceBefore float64   `gorm:"type:decimal(15,2);not null" json:"balance_before"`
+	BalanceAfter  float64   `gorm:"type:decimal(15,2);not null" json:"balance_after"`
+	CreatedAt     time.Time `json:"created_at"`
+
+	Member *Member `gorm:"foreignKey:MemberID" json:"member,omitempty"`
+}
+
+func (CommissionAdjustment) TableName() string { return "commission_adjustments" }

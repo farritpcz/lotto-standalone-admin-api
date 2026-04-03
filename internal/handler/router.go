@@ -229,6 +229,16 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				affiliate.POST("/settings", h.UpsertAffiliateSetting)
 				affiliate.DELETE("/settings/:id", h.DeleteAffiliateSetting)
 				affiliate.GET("/report", h.GetAffiliateReport)
+
+				// Share Templates — ข้อความสำเร็จรูปสำหรับแชร์
+				affiliate.GET("/share-templates", h.ListShareTemplates)
+				affiliate.POST("/share-templates", h.CreateShareTemplate)
+				affiliate.PUT("/share-templates/:id", h.UpdateShareTemplate)
+				affiliate.DELETE("/share-templates/:id", h.DeleteShareTemplate)
+
+				// Commission Adjustments — ปรับค่าคอมด้วยมือ + audit log
+				affiliate.GET("/adjustments", h.ListCommissionAdjustments)
+				affiliate.POST("/adjustments", h.CreateCommissionAdjustment)
 			}
 		}
 	}
