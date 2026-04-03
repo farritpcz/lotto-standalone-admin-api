@@ -93,7 +93,29 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		fail(c, 500, "failed to generate token")
 		return
 	}
+
+	// ⭐ ตั้ง httpOnly cookie สำหรับ admin JWT token + CSRF cookie
+	middleware.SetAdminTokenCookie(c, token, h.AdminJWTExpiryHours*3600, h.cookieConfig())
+	middleware.SetCSRFCookie(c, h.cookieConfig())
+
 	ok(c, gin.H{"admin": admin, "token": token, "permissions": admin.Permissions})
+}
+
+// AdminLogout ออกจากระบบ — ลบ httpOnly cookie
+//
+// POST /api/v1/auth/logout
+func (h *Handler) AdminLogout(c *gin.Context) {
+	middleware.ClearAdminTokenCookie(c, h.cookieConfig())
+	middleware.ClearCSRFCookie(c, h.cookieConfig())
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "logged out"})
+}
+
+// cookieConfig ดึง CookieConfig จาก Handler fields
+func (h *Handler) cookieConfig() middleware.CookieConfig {
+	return middleware.CookieConfig{
+		Domain: h.CookieDomain,
+		Secure: h.CookieSecure,
+	}
 }
 
 // =============================================================================

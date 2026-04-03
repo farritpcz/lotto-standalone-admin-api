@@ -77,6 +77,8 @@ func main() {
 	log.Println("✅ Redis connected:", cfg.RedisAddr())
 
 	h := handler.NewHandler(cfg.AdminJWTSecret, cfg.AdminJWTExpiryHours)
+	h.CookieDomain = cfg.CookieDomain
+	h.CookieSecure = cfg.CookieSecure
 	h.DB = db
 	h.Redis = rdb
 	h.EncryptionKey = cfg.RKAutoEncryptionKey

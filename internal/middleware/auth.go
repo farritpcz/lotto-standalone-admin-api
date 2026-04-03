@@ -24,34 +24,28 @@ type AdminClaims struct {
 // AdminJWTAuth middleware ตรวจสอบ admin JWT token
 //
 // Flow:
-//  1. อ่าน Authorization header: "Bearer <token>"
-//  2. Parse + verify token ด้วย admin secret
-//  3. ถ้า valid → เก็บ admin_id, admin_username, admin_role ใน context
-//  4. ถ้า invalid → return 401
+//  1. อ่าน token จาก httpOnly cookie (admin_token) ก่อน
+//  2. ถ้าไม่มี cookie → fallback อ่าน Authorization header: "Bearer <token>"
+//  3. Parse + verify token ด้วย admin secret
+//  4. ถ้า valid → เก็บ admin_id, admin_username, admin_role ใน context
+//  5. ถ้า invalid → return 401
+//
+// ⭐ รองรับทั้ง cookie (admin-web) และ header (API client)
 func AdminJWTAuth(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
+		// ⭐ ลำดับ: 1) httpOnly cookie → 2) Authorization header
+		tokenString := extractAdminToken(c)
+		if tokenString == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
-				"error":   "missing authorization header",
-			})
-			c.Abort()
-			return
-		}
-
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"error":   "invalid authorization format, expected: Bearer <token>",
+				"error":   "missing authentication token",
 			})
 			c.Abort()
 			return
 		}
 
 		claims := &AdminClaims{}
-		token, err := jwt.ParseWithClaims(parts[1], claims, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
 			}
@@ -91,6 +85,23 @@ func GenerateAdminToken(adminID int64, username, role, secret string, expiryHour
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
+}
+
+// extractAdminToken ดึง JWT token จาก cookie หรือ Authorization header
+func extractAdminToken(c *gin.Context) string {
+	// 1) httpOnly cookie (จาก admin-web)
+	if cookie, err := c.Cookie("admin_token"); err == nil && cookie != "" {
+		return cookie
+	}
+	// 2) Authorization header: "Bearer <token>" (fallback)
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			return parts[1]
+		}
+	}
+	return ""
 }
 
 // GetAdminID ดึง admin_id จาก context (helper)

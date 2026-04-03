@@ -38,6 +38,10 @@ type Config struct {
 	AdminJWTSecret     string
 	AdminJWTExpiryHours int
 
+	// Cookie — httpOnly cookie สำหรับ JWT
+	CookieDomain string
+	CookieSecure bool
+
 	// RKAUTO (GobexPay) — payment gateway อัตโนมัติ
 	RKAutoEnabled    bool
 	RKAutoBaseURL    string   // https://45.32.117.90/api/v1
@@ -75,6 +79,9 @@ func Load() *Config {
 
 		AdminJWTSecret:      getEnv("ADMIN_JWT_SECRET", "admin-secret-change-in-production"),
 		AdminJWTExpiryHours: getEnvInt("ADMIN_JWT_EXPIRY_HOURS", 8),
+
+		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
+		CookieSecure: getEnv("COOKIE_SECURE", "false") == "true",
 
 		// RKAUTO
 		RKAutoEnabled:    getEnv("RKAUTO_ENABLED", "false") == "true",
