@@ -81,7 +81,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 	{
 		// === Public ===
 		api.POST("/auth/login", h.AdminLogin)
-		api.POST("/auth/logout", h.AdminLogout) // ⭐ ลบ httpOnly cookies
+		api.POST("/auth/logout", h.AdminLogout)
 		api.GET("/public/contact-channels", h.ListPublicContactChannels)
 
 		// === Protected (ต้อง Admin JWT + CSRF + Audit Log) ===
