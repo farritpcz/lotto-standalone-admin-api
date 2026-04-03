@@ -143,6 +143,10 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.GET("/settings", h.GetSettings)
 			protected.PUT("/settings", h.UpdateSettings)
 
+			// ⭐ Agent Theme — ตั้งค่าสีธีม (เปลี่ยนสี → bump version → หน้าบ้าน refetch)
+			protected.GET("/agent/theme", h.GetAgentTheme)
+			protected.PUT("/agent/theme", h.UpdateAgentTheme)
+
 			// Deposit Requests — อนุมัติ/ปฏิเสธคำขอฝากเงิน
 			deposits := protected.Group("/deposits")
 			{

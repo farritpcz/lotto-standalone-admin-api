@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
@@ -957,6 +958,72 @@ func (h *Handler) GetProfitReport(c *gin.Context) {
 // =============================================================================
 // Settings
 // =============================================================================
+
+// =============================================================================
+// Agent Theme — ตั้งค่าสีธีม per-agent
+//
+// GET  /api/v1/agent/theme    → ดึงสีปัจจุบัน
+// PUT  /api/v1/agent/theme    → อัพเดทสี + bump theme_version (เคลีย cache หน้าบ้าน)
+// =============================================================================
+
+func (h *Handler) GetAgentTheme(c *gin.Context) {
+	type ThemeRow struct {
+		ThemePrimaryColor   string `json:"theme_primary_color"`
+		ThemeSecondaryColor string `json:"theme_secondary_color"`
+		ThemeBGColor        string `json:"theme_bg_color"`
+		ThemeAccentColor    string `json:"theme_accent_color"`
+		ThemeCardGradient1  string `json:"theme_card_gradient1"`
+		ThemeCardGradient2  string `json:"theme_card_gradient2"`
+		ThemeNavBG          string `json:"theme_nav_bg"`
+		ThemeHeaderBG       string `json:"theme_header_bg"`
+		ThemeVersion        int    `json:"theme_version"`
+	}
+	var theme ThemeRow
+	// ⭐ agent_id=1 สำหรับ standalone (multi-agent ใช้ jwt claims)
+	if err := h.DB.Table("agents").Where("id = 1").First(&theme).Error; err != nil {
+		fail(c, 404, "agent not found"); return
+	}
+	ok(c, theme)
+}
+
+func (h *Handler) UpdateAgentTheme(c *gin.Context) {
+	var req struct {
+		PrimaryColor   *string `json:"theme_primary_color"`
+		SecondaryColor *string `json:"theme_secondary_color"`
+		BGColor        *string `json:"theme_bg_color"`
+		AccentColor    *string `json:"theme_accent_color"`
+		CardGradient1  *string `json:"theme_card_gradient1"`
+		CardGradient2  *string `json:"theme_card_gradient2"`
+		NavBG          *string `json:"theme_nav_bg"`
+		HeaderBG       *string `json:"theme_header_bg"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
+
+	updates := map[string]interface{}{}
+	if req.PrimaryColor != nil   { updates["theme_primary_color"] = *req.PrimaryColor }
+	if req.SecondaryColor != nil { updates["theme_secondary_color"] = *req.SecondaryColor }
+	if req.BGColor != nil        { updates["theme_bg_color"] = *req.BGColor }
+	if req.AccentColor != nil    { updates["theme_accent_color"] = *req.AccentColor }
+	if req.CardGradient1 != nil  { updates["theme_card_gradient1"] = *req.CardGradient1 }
+	if req.CardGradient2 != nil  { updates["theme_card_gradient2"] = *req.CardGradient2 }
+	if req.NavBG != nil          { updates["theme_nav_bg"] = *req.NavBG }
+	if req.HeaderBG != nil       { updates["theme_header_bg"] = *req.HeaderBG }
+
+	if len(updates) == 0 {
+		fail(c, 400, "no fields to update"); return
+	}
+
+	// ⭐ Bump theme_version → หน้าบ้านเห็น version ไม่ตรง → refetch สีใหม่
+	if err := h.DB.Table("agents").Where("id = 1").
+		Updates(updates).
+		Update("theme_version", gorm.Expr("theme_version + 1")).Error; err != nil {
+		fail(c, 500, err.Error()); return
+	}
+
+	ok(c, gin.H{"message": "theme updated", "fields_updated": len(updates)})
+}
 
 func (h *Handler) GetSettings(c *gin.Context) {
 	var settings []model.Setting
