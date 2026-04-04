@@ -532,8 +532,8 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 	// สร้าง transaction record
 	txType := "admin_credit"
 	if req.Amount < 0 { txType = "admin_debit" }
-	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-		VALUES (?, ?, ?, ?, ?, 'admin_adjust', ?, ?)`,
+	tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		VALUES (1, ?, ?, ?, ?, ?, 'admin_adjust', ?, ?)`,
 		id, txType, req.Amount, member.Balance, member.Balance+req.Amount, req.Note, now)
 
 	tx.Commit()
@@ -1672,8 +1672,8 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 	tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", amount, memberID)
 
 	// สร้าง transaction record
-	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-		VALUES (?, 'deposit', ?, ?, ?, 'deposit_request', ?, ?)`,
+	tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		VALUES (1, ?, 'deposit', ?, ?, ?, 'deposit_request', ?, ?)`,
 		memberID, amount, balanceBefore, balanceBefore+amount, "อนุมัติโดยแอดมิน #"+strconv.FormatInt(adminID, 10), now)
 
 	// ─── First Deposit Bonus ──────────────────────────────────
@@ -1717,8 +1717,8 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 					tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", bonus, memberID)
 
 					// สร้าง bonus transaction
-					tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-						VALUES (?, 'bonus', ?, ?, ?, 'first_deposit', ?, ?)`,
+					tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+						VALUES (1, ?, 'bonus', ?, ?, ?, 'first_deposit', ?, ?)`,
 						memberID, bonus, balanceAfterDeposit, balanceAfterDeposit+bonus, "โบนัสฝากครั้งแรก", now)
 
 					// ─── ตั้ง turnover requirement ───────────
@@ -1820,13 +1820,20 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 		var balanceAfter float64
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
 
-		// บันทึก transaction
-		tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-			VALUES (?, 'admin_debit', ?, ?, ?, 'deposit_cancel', ?, ?)`,
+		// บันทึก transaction — หักเครดิตคืน
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', ?, ?, ?, 'deposit_cancel', ?, ?)`,
 			memberID, -amount, balanceAfter+amount, balanceAfter,
 			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
+	} else {
+		// ⭐ refund=false → ยกเลิกอย่างเดียว ไม่หักเงิน แต่บันทึก audit trail
+		var balance float64
+		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', 0, ?, ?, 'deposit_cancel_no_refund', ?, ?)`,
+			memberID, balance, balance,
+			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+" (ไม่หักเครดิต): "+req.Reason, now)
 	}
-	// ⭐ ถ้า refund=false → ยกเลิกรายการอย่างเดียว ไม่หักเงิน
 
 	tx.Commit()
 	ok(c, gin.H{"id": id, "status": "cancelled", "amount": amount, "member_id": memberID, "reason": req.Reason, "refund": shouldRefund})
@@ -2007,10 +2014,18 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
 
 		// บันทึก transaction คืนเงิน
-		tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-			VALUES (?, 'refund', ?, ?, ?, 'withdraw_reject', ?, ?)`,
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (1, ?, 'refund', ?, ?, ?, 'withdraw_reject', ?, ?)`,
 			memberID, amount, balanceAfter-amount, balanceAfter,
 			"คืนเงินถอน #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
+	} else {
+		// ⭐ refund=false → ไม่คืนเงิน (ทุจริต) แต่บันทึก audit trail
+		var balance float64
+		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', 0, ?, ?, 'withdraw_reject_no_refund', ?, ?)`,
+			memberID, balance, balance,
+			"ปฏิเสธถอน #"+strconv.FormatInt(id, 10)+" (ไม่คืนเครดิต/ทุจริต): "+req.Reason, now)
 	}
 
 	tx.Commit()
