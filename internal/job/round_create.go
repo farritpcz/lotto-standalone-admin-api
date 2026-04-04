@@ -62,27 +62,54 @@ func isEveryDay(_ time.Time) bool { return true }
 // ─── Schedule config ──────────────────────────────────────
 // กำหนดการสำหรับหวยแต่ละประเภท — เพิ่ม/ลบได้ง่าย
 var defaultSchedules = []roundSchedule{
-	// หวยไทย: 1, 16 ของเดือน | เปิด 06:00 ปิด 15:30
-	{LotteryCode: "THAI", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
+	// ── หวยไทย ────────────────────────────────────────────────
+	{LotteryCode: "THAI_GOV", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
+	{LotteryCode: "BAAC", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
+	{LotteryCode: "GSB", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
 
-	// หวยลาว: จ, พ, ศ | เปิด 06:00 ปิด 20:00
-	{LotteryCode: "LAO", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isLaoDay},
+	// ── หวยลาว (ทุกวัน) ──────────────────────────────────────
+	{LotteryCode: "LAO_VIP", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
+	{LotteryCode: "LAO_PATTANA", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
+	{LotteryCode: "LAO_STAR", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
+	{LotteryCode: "LAO_SAMAKKEE", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
+	{LotteryCode: "LAO_THAKHEK_VIP", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
 
-	// หวยฮานอย: ทุกวัน | เปิด 06:00 ปิด 18:00
+	// ── หวยฮานอย (ทุกวัน) ────────────────────────────────────
 	{LotteryCode: "HANOI", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 0, ShouldRun: isEveryDay},
+	{LotteryCode: "HANOI_VIP", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 0, ShouldRun: isEveryDay},
+	{LotteryCode: "HANOI_PATTANA", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 0, ShouldRun: isEveryDay},
 
-	// หวยหุ้นไทย เช้า: จ-ศ | เปิด 09:00 ปิด 12:00
-	{LotteryCode: "STOCK_TH", OpenHour: 9, OpenMin: 0, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday, Suffix: "-AM"},
-	// หวยหุ้นไทย บ่าย: จ-ศ | เปิด 13:00 ปิด 16:00
-	{LotteryCode: "STOCK_TH", OpenHour: 13, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday, Suffix: "-PM"},
-
-	// หวยหุ้นต่างประเทศ เช้า: จ-ศ
-	{LotteryCode: "STOCK_FOREIGN", OpenHour: 9, OpenMin: 0, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday, Suffix: "-AM"},
-	// หวยหุ้นต่างประเทศ บ่าย: จ-ศ
-	{LotteryCode: "STOCK_FOREIGN", OpenHour: 13, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday, Suffix: "-PM"},
-
-	// หวยมาเลย์: ทุกวัน | เปิด 06:00 ปิด 18:30
+	// ── มาเลย์ (ทุกวัน) ──────────────────────────────────────
 	{LotteryCode: "MALAY", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 30, ShouldRun: isEveryDay},
+
+	// ── หวยหุ้น (จ-ศ) — แต่ละตัวมี 1 รอบ/วัน ────────────────
+	{LotteryCode: "STOCK_RUSSIA_VIP", OpenHour: 9, OpenMin: 0, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_DJ_VIP", OpenHour: 20, OpenMin: 0, CloseHour: 23, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_HSI_VIP_AM", OpenHour: 9, OpenMin: 0, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_TAIWAN_VIP", OpenHour: 9, OpenMin: 0, CloseHour: 13, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_KOREA_VIP", OpenHour: 9, OpenMin: 0, CloseHour: 13, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_HSI_VIP_PM", OpenHour: 13, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_NIKKEI_AM", OpenHour: 9, OpenMin: 0, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_CHINA_AM", OpenHour: 9, OpenMin: 30, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_HSI_AM", OpenHour: 9, OpenMin: 30, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_TAIWAN", OpenHour: 9, OpenMin: 0, CloseHour: 13, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_NIKKEI_PM", OpenHour: 12, OpenMin: 30, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_KOREA", OpenHour: 9, OpenMin: 0, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_CHINA_PM", OpenHour: 13, OpenMin: 0, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_HSI_PM", OpenHour: 13, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_TH_PM", OpenHour: 14, OpenMin: 30, CloseHour: 16, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_SINGAPORE", OpenHour: 9, OpenMin: 0, CloseHour: 17, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_INDIA", OpenHour: 10, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_UK", OpenHour: 14, OpenMin: 0, CloseHour: 21, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_GERMANY", OpenHour: 14, OpenMin: 0, CloseHour: 22, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_RUSSIA", OpenHour: 13, OpenMin: 0, CloseHour: 23, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_DJ", OpenHour: 20, OpenMin: 30, CloseHour: 3, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_GERMANY_VIP", OpenHour: 14, OpenMin: 0, CloseHour: 22, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_UK_VIP", OpenHour: 14, OpenMin: 0, CloseHour: 21, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_NIKKEI_VIP_PM", OpenHour: 12, OpenMin: 30, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_NIKKEI_VIP_AM", OpenHour: 9, OpenMin: 0, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_CHINA_VIP_PM", OpenHour: 13, OpenMin: 0, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
+	{LotteryCode: "STOCK_CHINA_VIP_AM", OpenHour: 9, OpenMin: 30, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
 }
 
 // StartRoundCreationJob เริ่ม cron job สร้างรอบหวยอัตโนมัติ

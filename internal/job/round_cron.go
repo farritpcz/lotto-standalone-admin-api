@@ -26,7 +26,7 @@ import (
 
 // yeekeeCodes — ประเภทหวยยี่กี ที่จัดการ transition เองใน member-api
 // ไม่ต้องทำ auto-transition ที่นี่
-var yeekeeCodes = []string{"YEEKEE", "YEEKEE_5", "YEEKEE_15", "YEEKEE_VIP"}
+var yeekeeCodes = []string{"YEEKEE"}
 
 // StartRoundTransitionJob เริ่ม cron job สำหรับ auto-transition rounds
 //
