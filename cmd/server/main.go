@@ -26,6 +26,7 @@ import (
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/rkauto"
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/service"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/storage"
 )
 
@@ -132,11 +133,13 @@ func main() {
 		log.Println("ℹ️ RKAUTO disabled (set RKAUTO_ENABLED=true to enable)")
 	}
 
+	// ─── Round Service (centralized round management) ────────
+	roundSvc := service.NewRoundService(db)
+	h.RoundService = roundSvc
+
 	// ─── Background Jobs ──────────────────────────────────────
-	// Auto-transition rounds: upcoming→open→closed ตามเวลา (ทุก 30 วินาที)
-	job.StartRoundTransitionJob(db)
-	// Auto-create rounds: สร้างรอบล่วงหน้า 7 วัน (ทุก 1 ชั่วโมง)
-	job.StartRoundCreationJob(db)
+	// ⭐ Round Lifecycle: สร้างรอบ + auto transition (unified job)
+	job.StartRoundLifecycleJob(roundSvc)
 	// Auto-result หวยหุ้น: ดึงผลจาก API ตลาดหุ้น (ทุก 5 นาที)
 	job.StartAutoResultJob(db)
 

@@ -101,6 +101,7 @@ type LotteryRound struct {
 	ResultFront3  *string    `gorm:"column:result_front3;size:3" json:"result_front3"`   // 3 ตัวหน้า (หวยไทย)
 	ResultBottom3 *string    `gorm:"column:result_bottom3;size:100" json:"result_bottom3"` // 3 ตัวล่าง (comma-separated, หวยไทย)
 	ResultedAt    *time.Time `json:"resulted_at"`
+	RejectReason  string     `gorm:"column:reject_reason;type:text" json:"reject_reason,omitempty"` // เหตุผลยกเลิก (void)
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 	// Relations

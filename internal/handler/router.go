@@ -66,6 +66,7 @@ type Handler struct {
 	RKAutoClient        interface{}      // *rkauto.Client (nil = disabled)
 	EncryptionKey       string           // AES-256 key สำหรับ encrypt bank credentials
 	R2                  interface{}      // *storage.R2Client (nil = local fallback)
+	RoundService        interface{}      // *service.RoundService — ⭐ centralized round management
 }
 
 // NewHandler สร้าง Handler instance
@@ -112,6 +113,11 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.GET("/rounds", h.ListRounds)
 			protected.POST("/rounds", h.CreateRound)
 			protected.PUT("/rounds/:id/status", h.UpdateRoundStatus)
+			// ⭐ Manual round control — เปิด/ปิด/ยกเลิกรอบ
+			protected.PUT("/rounds/:id/open", h.ManualOpenRound)
+			protected.PUT("/rounds/:id/close", h.ManualCloseRound)
+			protected.PUT("/rounds/:id/void", h.VoidRound)
+			protected.GET("/rounds/schedules", h.ListSchedules)
 
 			// Results — กรอกผลรางวัล
 			// ⭐ ตรงนี้สำคัญ: เมื่อ admin กรอกผล → trigger job คำนวณแพ้ชนะ + จ่ายเงิน
