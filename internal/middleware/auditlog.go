@@ -27,13 +27,19 @@ func AuditLog(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		// อ่าน request body (ตัดที่ 2KB เพื่อไม่เก็บข้อมูลใหญ่)
+		// อ่าน request body ทั้งหมด แล้วคืนกลับให้ handler ใช้ต่อ
+		// ⚠️ เก็บ log แค่ 2KB แต่คืน body เต็มให้ handler
 		var bodyStr string
 		if c.Request.Body != nil {
-			bodyBytes, _ := io.ReadAll(io.LimitReader(c.Request.Body, 2048))
-			bodyStr = string(bodyBytes)
-			// คืน body กลับให้ handler ใช้ต่อ
+			bodyBytes, _ := io.ReadAll(c.Request.Body)
+			// คืน body เต็มกลับให้ handler ใช้ต่อ (สำคัญ! ห้ามตัด)
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			// เก็บ log แค่ 2KB
+			if len(bodyBytes) > 2048 {
+				bodyStr = string(bodyBytes[:2048]) + "...(truncated)"
+			} else {
+				bodyStr = string(bodyBytes)
+			}
 		}
 
 		// ดำเนินการ handler
