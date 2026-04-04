@@ -479,12 +479,24 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	var member model.Member
 	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
 	var req struct {
-		Phone string `json:"phone"`
-		Email string `json:"email"`
+		Phone    string `json:"phone"`
+		Email    string `json:"email"`
+		Password string `json:"password"` // ⭐ admin reset password
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 	if req.Phone != "" { member.Phone = req.Phone }
 	if req.Email != "" { member.Email = req.Email }
+	// ⭐ รีเซ็ตรหัสผ่าน (ถ้าส่งมา)
+	if req.Password != "" {
+		if len(req.Password) < 6 {
+			fail(c, 400, "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"); return
+		}
+		hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			fail(c, 500, "failed to hash password"); return
+		}
+		member.PasswordHash = string(hashed)
+	}
 	h.DB.Save(&member)
 	ok(c, member)
 }
