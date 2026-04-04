@@ -196,6 +196,49 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.POST("/bank-accounts/:id/activate-rkauto", h.ActivateBankAccountRKAuto)
 			protected.POST("/bank-accounts/:id/deactivate-rkauto", h.DeactivateBankAccountRKAuto)
 
+			// ⭐ Member Levels — ระบบ level สมาชิก (Bronze→Platinum)
+			memberLevels := protected.Group("/member-levels")
+			{
+				memberLevels.GET("", h.ListMemberLevels)
+				memberLevels.POST("", h.CreateMemberLevel)
+				memberLevels.PUT("/reorder", h.ReorderMemberLevels) // ⭐ ต้องอยู่ก่อน /:id
+				memberLevels.PUT("/:id", h.UpdateMemberLevel)
+				memberLevels.DELETE("/:id", h.DeleteMemberLevel)
+			}
+
+			// ⭐ Promotions — ระบบโปรโมชั่น (first_deposit, cashback ฯลฯ)
+			promos := protected.Group("/promotions")
+			{
+				promos.GET("", h.ListPromotions)
+				promos.POST("", h.CreatePromotion)
+				promos.PUT("/:id", h.UpdatePromotion)
+				promos.PUT("/:id/status", h.UpdatePromotionStatus)
+				promos.DELETE("/:id", h.DeletePromotion)
+			}
+
+			// ⭐ CMS — จัดการเนื้อหาเว็บ (แบนเนอร์ + ตัวอักษรวิ่ง)
+			cms := protected.Group("/cms")
+			{
+				cms.GET("/banners", h.ListBanners)
+				cms.POST("/banners", h.CreateBanner)
+				cms.PUT("/banners/reorder", h.ReorderBanners) // ⭐ ต้องอยู่ก่อน /:id
+				cms.PUT("/banners/:id", h.UpdateBanner)
+				cms.DELETE("/banners/:id", h.DeleteBanner)
+				cms.GET("/ticker", h.GetTicker)
+				cms.PUT("/ticker", h.UpdateTicker)
+			}
+
+			// ⭐ Notifications — ตั้งค่า Telegram webhook
+			notif := protected.Group("/notifications")
+			{
+				notif.GET("/config", h.GetNotificationConfig)
+				notif.PUT("/config", h.UpdateNotificationConfig)
+				notif.POST("/test", h.TestNotification)
+			}
+
+			// Member Credit Report
+			protected.GET("/reports/member-credit", h.GetMemberCreditReport)
+
 			// ⭐ Auto-Ban Rules — กฎอั้นเลขอัตโนมัติ
 			autoBan := protected.Group("/auto-ban-rules")
 			{
