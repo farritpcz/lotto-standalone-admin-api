@@ -1027,10 +1027,43 @@ func (h *Handler) ListBans(c *gin.Context) {
 }
 
 func (h *Handler) CreateBan(c *gin.Context) {
-	var ban model.NumberBan
-	if err := c.ShouldBindJSON(&ban); err != nil { fail(c, 400, err.Error()); return }
-	ban.Status = "active"
-	ban.CreatedAt = time.Now()
+	// ⭐ รับทั้ง bet_type_id (int) หรือ bet_type_id (string code เช่น "3TOP")
+	var req struct {
+		LotteryTypeID  int64   `json:"lottery_type_id" binding:"required"`
+		BetTypeID      interface{} `json:"bet_type_id"` // int หรือ string code
+		Number         string  `json:"number" binding:"required"`
+		BanType        string  `json:"ban_type"`
+		ReducedRate    float64 `json:"reduced_rate"`
+		MaxAmount      float64 `json:"max_amount"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+
+	// Resolve bet_type_id — ถ้าเป็น string code ให้หา ID จาก DB
+	var betTypeID int64
+	switch v := req.BetTypeID.(type) {
+	case float64:
+		betTypeID = int64(v)
+	case string:
+		// หา bet_type ID จาก code เช่น "3TOP" → id
+		h.DB.Table("bet_types").Select("id").Where("code = ?", v).Scan(&betTypeID)
+		if betTypeID == 0 {
+			fail(c, 400, "ไม่พบประเภทเดิมพัน: "+v); return
+		}
+	default:
+		fail(c, 400, "bet_type_id ต้องเป็นตัวเลขหรือ code"); return
+	}
+
+	ban := model.NumberBan{
+		LotteryTypeID: req.LotteryTypeID,
+		BetTypeID:     betTypeID,
+		Number:        req.Number,
+		BanType:       req.BanType,
+		ReducedRate:   req.ReducedRate,
+		MaxAmount:     req.MaxAmount,
+		Status:        "active",
+		CreatedAt:     time.Now(),
+	}
+	if ban.BanType == "" { ban.BanType = "full_ban" }
 	if err := h.DB.Create(&ban).Error; err != nil { fail(c, 500, "failed to create ban"); return }
 	ok(c, ban)
 }
