@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -700,6 +701,8 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 		Top3    string `json:"top3" binding:"required"`
 		Top2    string `json:"top2" binding:"required"`
 		Bottom2 string `json:"bottom2" binding:"required"`
+		Front3  string `json:"front3"`  // 3 ตัวหน้า (optional)
+		Bottom3 string `json:"bottom3"` // 3 ตัวล่าง (optional, comma-separated)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
@@ -753,6 +756,21 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 			isWin = bet.Number == req.Top2
 		case "2BOTTOM":
 			isWin = bet.Number == req.Bottom2
+		case "3FRONT":
+			isWin = req.Front3 != "" && bet.Number == req.Front3
+		case "3BOTTOM":
+			if req.Bottom3 != "" {
+				for _, b3 := range strings.Split(req.Bottom3, ",") {
+					if strings.TrimSpace(b3) == bet.Number { isWin = true; break }
+				}
+			}
+		case "4TOP":
+			isWin = req.Front3 != "" && len(req.Front3) >= 1 && len(req.Top3) >= 3 && bet.Number == (req.Front3[len(req.Front3)-1:]+req.Top3)[:4]
+		case "4TOD":
+			if req.Front3 != "" && len(req.Top3) >= 3 {
+				full4 := (req.Front3[len(req.Front3)-1:] + req.Top3)[:4]
+				isWin = sortString(bet.Number) == sortString(full4)
+			}
 		case "RUN_TOP":
 			isWin = containsDigit(req.Top3, bet.Number) || containsDigit(req.Top2, bet.Number)
 		case "RUN_BOT":
@@ -775,7 +793,7 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 	ok(c, gin.H{
 		"round_id":     roundID,
 		"round_number": round.RoundNumber,
-		"result":       gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2},
+		"result":       gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2, "front3": req.Front3, "bottom3": req.Bottom3},
 		"total_bets":   totalBets,
 		"total_amount":  totalAmount,
 		"winners":      winners,
