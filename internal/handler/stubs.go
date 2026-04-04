@@ -1767,16 +1767,26 @@ func (h *Handler) RejectDeposit(c *gin.Context) {
 // CancelDeposit ยกเลิกรายการฝากที่อนุมัติแล้ว (reverse — หักเงินคืน)
 // PUT /api/v1/deposits/:id/cancel
 // Body (optional): { "reason": "เหตุผล" }
+// CancelDeposit ยกเลิกรายการฝากที่อนุมัติแล้ว
+// ⭐ รองรับ 2 โหมด:
+//   - refund=true (default): ยกเลิก + หักเครดิตคืน (ฝากผิด/ซ้ำ)
+//   - refund=false: ยกเลิก + ไม่หักเครดิต (แอดมินเติมให้เอง/กรณีพิเศษ)
 func (h *Handler) CancelDeposit(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
 
 	var req struct {
 		Reason string `json:"reason"`
+		Refund *bool  `json:"refund"` // nil = default true (หักเครดิตคืน)
 	}
 	c.ShouldBindJSON(&req)
 	if req.Reason == "" {
 		req.Reason = "ยกเลิกโดยแอดมิน"
+	}
+	// ⭐ default refund = true (หักเครดิตคืน)
+	shouldRefund := true
+	if req.Refund != nil {
+		shouldRefund = *req.Refund
 	}
 
 	// ดึงข้อมูลคำขอ
@@ -1798,25 +1808,28 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 	tx.Exec("UPDATE deposit_requests SET status = 'cancelled', reject_reason = ?, approved_by = ? WHERE id = ?",
 		req.Reason, adminID, id)
 
-	// หักเงินคืน (atomic)
-	debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", amount, memberID, amount)
-	if debitResult.RowsAffected == 0 {
-		tx.Rollback()
-		fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืน"); return
+	if shouldRefund {
+		// ⭐ หักเงินคืน (atomic — ตรวจว่ายอดพอ)
+		debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", amount, memberID, amount)
+		if debitResult.RowsAffected == 0 {
+			tx.Rollback()
+			fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืน"); return
+		}
+
+		// ดึง balance ล่าสุด
+		var balanceAfter float64
+		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
+
+		// บันทึก transaction
+		tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (?, 'admin_debit', ?, ?, ?, 'deposit_cancel', ?, ?)`,
+			memberID, -amount, balanceAfter+amount, balanceAfter,
+			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
 	}
-
-	// ดึง balance ล่าสุด
-	var balanceAfter float64
-	tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
-
-	// บันทึก transaction
-	tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-		VALUES (?, 'admin_debit', ?, ?, ?, 'deposit_cancel', ?, ?)`,
-		memberID, -amount, balanceAfter+amount, balanceAfter,
-		"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
+	// ⭐ ถ้า refund=false → ยกเลิกรายการอย่างเดียว ไม่หักเงิน
 
 	tx.Commit()
-	ok(c, gin.H{"id": id, "status": "cancelled", "amount": amount, "member_id": memberID, "reason": req.Reason})
+	ok(c, gin.H{"id": id, "status": "cancelled", "amount": amount, "member_id": memberID, "reason": req.Reason, "refund": shouldRefund})
 }
 
 // =============================================================================
