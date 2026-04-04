@@ -1452,19 +1452,21 @@ func (h *Handler) ListDepositRequests(c *gin.Context) {
 	status := c.DefaultQuery("status", "")
 
 	type DepositRow struct {
-		ID        int64   `json:"id"`
-		MemberID  int64   `json:"member_id"`
-		Username  string  `json:"username"`
-		Amount    float64 `json:"amount"`
-		Status    string  `json:"status"`
-		CreatedAt string  `json:"created_at"`
+		ID          int64   `json:"id"`
+		MemberID    int64   `json:"member_id"`
+		Username    string  `json:"username"`
+		Amount      float64 `json:"amount"`
+		Status      string  `json:"status"`
+		SlipURL     *string `json:"slip_url"`
+		AutoMatched bool    `json:"auto_matched"`
+		CreatedAt   string  `json:"created_at"`
 	}
 
 	var rows []DepositRow
 	var total int64
 
 	query := h.DB.Table("deposit_requests d").
-		Select("d.id, d.member_id, m.username, d.amount, d.status, d.created_at").
+		Select("d.id, d.member_id, m.username, d.amount, d.status, d.slip_url, COALESCE(d.auto_matched, 0) AS auto_matched, d.created_at").
 		Joins("LEFT JOIN members m ON m.id = d.member_id")
 	if status != "" {
 		query = query.Where("d.status = ?", status)
