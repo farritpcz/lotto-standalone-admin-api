@@ -207,6 +207,8 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				yeekee.GET("/rounds/:id", h.GetYeekeeRoundDetail)   // รอบเดียว + shoots
 				yeekee.GET("/rounds/:id/shoots", h.ListYeekeeShoots) // เลขยิงในรอบ (paginated)
 				yeekee.GET("/stats", h.GetYeekeeStats)              // สถิติวันนี้
+				yeekee.GET("/config", h.GetYeekeeAgentConfig)       // ⭐ ดูว่า agent ไหนเปิดยี่กี
+				yeekee.POST("/config", h.SetYeekeeAgentConfig)      // ⭐ เปิด/ปิดยี่กี per agent
 			}
 
 			// Staff (Admin Users) — CRUD + permissions + history

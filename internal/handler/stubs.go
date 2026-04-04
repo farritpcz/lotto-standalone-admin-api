@@ -20,6 +20,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
+	"github.com/farritpcz/lotto-core/payout"
+	coreTypes "github.com/farritpcz/lotto-core/types"
+
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
@@ -48,6 +51,14 @@ func pageParams(c *gin.Context) (int, int) {
 	if page < 1 { page = 1 }
 	if perPage < 1 || perPage > 100 { perPage = 20 }
 	return page, perPage
+}
+
+// parseFloat parse string → float64 with default value
+func parseFloat(s string, defaultVal float64) float64 {
+	if s == "" { return defaultVal }
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil { return defaultVal }
+	return v
 }
 
 // =============================================================================
@@ -725,93 +736,172 @@ func containsDigit(result string, digit string) bool {
 //  4. อัพเดท bets: won/lost + win_amount
 //  5. จ่ายเงินคนชนะ: members.balance += win_amount
 //  6. สร้าง transactions สำหรับคนชนะ
+// SubmitResult กรอกผลรางวัล + settle bets ทั้งรอบ
+//
+// Flow:
+//   1. รับผลจาก admin (top3, top2, bottom2, front3?, bottom3?)
+//   2. บันทึกผลลง lottery_rounds
+//   3. ดึง bets ทั้งหมดของรอบ (status=pending) + preload BetType
+//   4. แปลง DB bets → lotto-core types.Bet
+//   5. เรียก lotto-core payout.SettleRound() → ได้ผลทุก bet (won/lost + winAmount)
+//   6. อัพเดท bets ใน DB + จ่ายเงินคนชนะ (atomic per member)
+//   7. คำนวณ commission ให้ referrers (goroutine)
+//
+// ⭐ ใช้ lotto-core payout เต็ม — รองรับ 3TOP, 3TOD, 3FRONT, 3BOTTOM,
+//    4TOP, 4TOD, 2TOP, 2BOTTOM, RUN_TOP, RUN_BOT
 func (h *Handler) SubmitResult(c *gin.Context) {
 	roundID, _ := strconv.ParseInt(c.Param("roundId"), 10, 64)
 
+	// ─── Step 1: รับผลจาก admin ────────────────────────────────
+	// top3, top2, bottom2 บังคับกรอก
+	// front3, bottom3 optional (ใช้กับหวยไทยที่มี 3 ตัวหน้า / 3 ตัวล่าง)
 	var req struct {
-		Top3    string `json:"top3" binding:"required"`
-		Top2    string `json:"top2" binding:"required"`
-		Bottom2 string `json:"bottom2" binding:"required"`
+		Top3    string `json:"top3" binding:"required"`     // 3 ตัวบน เช่น "847"
+		Top2    string `json:"top2" binding:"required"`     // 2 ตัวบน เช่น "47"
+		Bottom2 string `json:"bottom2" binding:"required"`  // 2 ตัวล่าง เช่น "56"
+		Front3  string `json:"front3"`                      // 3 ตัวหน้า เช่น "491" (optional)
+		Bottom3 string `json:"bottom3"`                     // 3 ตัวล่าง เช่น "123,456" (optional, comma-separated)
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
 
-	// 1. ดึง round → เช็คว่ายังไม่มีผล
+	// ─── Step 2: ดึง round → เช็คว่ายังไม่มีผล ────────────────
 	var round model.LotteryRound
-	if err := h.DB.First(&round, roundID).Error; err != nil { fail(c, 404, "round not found"); return }
-	if round.Status == "resulted" { fail(c, 400, "round already has result"); return }
+	if err := h.DB.First(&round, roundID).Error; err != nil {
+		fail(c, 404, "round not found"); return
+	}
+	if round.Status == "resulted" {
+		fail(c, 400, "round already has result"); return
+	}
 
-	// 2. บันทึกผล
+	// ─── Step 3: บันทึกผลลง DB ────────────────────────────────
 	now := time.Now()
-	h.DB.Model(&round).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"result_top3":    req.Top3,
 		"result_top2":    req.Top2,
 		"result_bottom2": req.Bottom2,
 		"status":         "resulted",
 		"resulted_at":    &now,
-	})
+	}
+	// เพิ่ม front3/bottom3 ถ้ามี
+	if req.Front3 != "" {
+		updates["result_front3"] = req.Front3
+	}
+	if req.Bottom3 != "" {
+		updates["result_bottom3"] = req.Bottom3
+	}
+	h.DB.Model(&round).Updates(updates)
 
-	// 3. ดึง bets ทั้งหมดของรอบ (pending)
-	var bets []model.Bet
+	// ─── Step 4: ดึง bets ทั้งหมดของรอบ (pending) ──────────────
+	var dbBets []model.Bet
 	h.DB.Where("lottery_round_id = ? AND status = ?", roundID, "pending").
-		Preload("BetType").Find(&bets)
+		Preload("BetType").Find(&dbBets)
 
-	// 4-6. ⭐ TODO: เรียก lotto-core payout.SettleRound() + จ่ายเงิน
-	// (ตอนนี้ mark as done เพื่อแสดง flow — implement จริงเมื่อ integrate lotto-core)
-	// ดู service/result_service.go สำหรับ pseudo code
-	settledCount := 0
-	totalWin := 0.0
-
-	for _, bet := range bets {
-		// Simple matching (TODO: ใช้ lotto-core payout.Match() แทน)
-		isWin := false
-		winAmount := 0.0
-		betTypeCode := ""
-		if bet.BetType != nil { betTypeCode = bet.BetType.Code }
-
-		switch betTypeCode {
-		case "3TOP":
-			isWin = bet.Number == req.Top3
-		case "2TOP":
-			isWin = bet.Number == req.Top2
-		case "2BOTTOM":
-			isWin = bet.Number == req.Bottom2
-		}
-
-		if isWin {
-			winAmount = bet.Amount * bet.Rate
-		}
-
-		status := "lost"
-		if isWin { status = "won" }
-
-		h.DB.Model(&bet).Updates(map[string]interface{}{
-			"status":     status,
-			"win_amount": winAmount,
-			"settled_at": &now,
+	if len(dbBets) == 0 {
+		ok(c, gin.H{
+			"round_id":   roundID,
+			"result":     gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2, "front3": req.Front3, "bottom3": req.Bottom3},
+			"total_bets": 0, "settled": 0, "total_win": 0,
 		})
-
-		if isWin {
-			// จ่ายเงินคนชนะ
-			h.DB.Model(&model.Member{}).Where("id = ?", bet.MemberID).
-				Update("balance", h.DB.Raw("balance + ?", winAmount))
-			totalWin += winAmount
-		}
-		settledCount++
+		return
 	}
 
-	// ⭐ Step 7: คำนวณ commission ให้ referrers ของ bettors
+	// ─── Step 5: แปลง DB bets → lotto-core types.Bet ──────────
+	// lotto-core ใช้ struct types.Bet สำหรับ matching (ไม่ใช่ DB model)
+	coreBets := make([]coreTypes.Bet, 0, len(dbBets))
+	for _, b := range dbBets {
+		betTypeCode := ""
+		if b.BetType != nil {
+			betTypeCode = b.BetType.Code
+		}
+		coreBets = append(coreBets, coreTypes.Bet{
+			ID:       b.ID,
+			MemberID: b.MemberID,
+			RoundID:  b.LotteryRoundID,
+			BetType:  coreTypes.BetType(betTypeCode), // แปลง string → coreTypes.BetType
+			Number:   b.Number,
+			Amount:   b.Amount,
+			Rate:     b.Rate,
+			Status:   coreTypes.BetStatusPending, // pending → จะถูก settle
+		})
+	}
+
+	// ─── Step 6: เรียก lotto-core payout.SettleRound() ─────────
+	// สร้าง RoundResult จากผลที่ admin กรอก
+	roundResult := coreTypes.RoundResult{
+		Top3:    req.Top3,
+		Top2:    req.Top2,
+		Bottom2: req.Bottom2,
+		Front3:  req.Front3,
+		Bottom3: req.Bottom3,
+	}
+	// SettleRound จะ Match ทุก bet → คำนวณ won/lost + winAmount
+	settleOutput := payout.SettleRound(payout.SettleRoundInput{
+		Bets:   coreBets,
+		Result: roundResult,
+	})
+
+	// ─── Step 7: อัพเดท bets + จ่ายเงิน ───────────────────────
+	// สร้าง map betID → BetResult เพื่อ lookup เร็ว
+	resultMap := make(map[int64]coreTypes.BetResult, len(settleOutput.BetResults))
+	for _, r := range settleOutput.BetResults {
+		resultMap[r.BetID] = r
+	}
+
+	// อัพเดททีละ bet
+	for _, bet := range dbBets {
+		r, exists := resultMap[bet.ID]
+		if !exists {
+			continue // bet นี้ถูก skip (อาจเป็น settled แล้ว)
+		}
+
+		// อัพเดท status + win_amount
+		h.DB.Model(&bet).Updates(map[string]interface{}{
+			"status":     string(r.Status), // "won" หรือ "lost"
+			"win_amount": r.WinAmount,
+			"settled_at": &now,
+		})
+	}
+
+	// จ่ายเงินคนชนะ — group by member เพื่อ update ทีเดียวต่อคน
+	// ใช้ lotto-core GroupWinnersByMember() → map[memberID]totalWin
+	winByMember := payout.GroupWinnersByMember(coreBets, settleOutput.BetResults)
+	for memberID, totalMemberWin := range winByMember {
+		// ใช้ SQL expression เพื่อ atomic increment (ไม่มี race condition)
+		h.DB.Model(&model.Member{}).Where("id = ?", memberID).
+			Update("balance", gorm.Expr("balance + ?", totalMemberWin))
+
+		// บันทึก transaction สำหรับเงินรางวัล
+		h.DB.Create(&model.Transaction{
+			MemberID:      memberID,
+			Type:          "win",
+			Amount:        totalMemberWin,
+			ReferenceID:   &roundID,
+			ReferenceType: "lottery_round",
+			Note:          "เงินรางวัลรอบ " + round.RoundNumber,
+			CreatedAt:     now,
+		})
+	}
+
+	// ─── Step 8: คำนวณ commission ให้ referrers ─────────────────
 	// Run ใน goroutine แยก → ไม่ block response
-	// ดู internal/job/commission_job.go สำหรับ logic ทั้งหมด
 	go job.CalculateCommissions(h.DB, roundID, 1 /* agentID = 1 สำหรับ standalone */)
 
+	// ─── Response ──────────────────────────────────────────────
 	ok(c, gin.H{
 		"round_id":      roundID,
-		"result":        gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2},
-		"total_bets":    len(bets),
-		"settled":       settledCount,
-		"total_win":     totalWin,
+		"result":        gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2, "front3": req.Front3, "bottom3": req.Bottom3},
+		"total_bets":    len(dbBets),
+		"settled":       len(settleOutput.BetResults),
+		"total_winners": settleOutput.TotalWinners,
+		"total_win":     settleOutput.TotalWinAmount,
+		"total_profit":  settleOutput.Profit,
 	})
 }
+
+// strPtr helper — สร้าง *string จาก string
+func strPtr(s string) *string { return &s }
 
 func (h *Handler) ListResults(c *gin.Context) {
 	page, perPage := pageParams(c)
@@ -1418,6 +1508,63 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 		VALUES (?, 'deposit', ?, ?, ?, 'deposit_request', ?, ?)`,
 		memberID, amount, balanceBefore, balanceBefore+amount, "อนุมัติโดยแอดมิน #"+strconv.FormatInt(adminID, 10), now)
 
+	// ─── First Deposit Bonus ──────────────────────────────────
+	// เช็คว่าเป็นการฝากครั้งแรกหรือไม่ + settings เปิดโบนัสอยู่
+	//
+	// Settings ที่เกี่ยวข้อง (ตั้งค่าใน admin panel):
+	//   - first_deposit_bonus_enabled: "true"/"false"
+	//   - first_deposit_bonus_percent: 100 (= 100% ของยอดฝาก)
+	//   - first_deposit_bonus_max: 500 (= โบนัสสูงสุด 500 บาท)
+	//   - first_deposit_bonus_turnover: 5 (= ต้องเล่น 5 เท่าก่อนถอน)
+	{
+		// เช็ค setting ว่าเปิดโบนัสหรือไม่
+		var bonusEnabled string
+		tx.Table("settings").Select("value").Where("`key` = 'first_deposit_bonus_enabled'").Scan(&bonusEnabled)
+
+		if bonusEnabled == "true" {
+			// เช็คว่าเป็นการฝากครั้งแรกจริงๆ (ดูจาก transactions ว่ามี deposit ก่อนหน้าไหม)
+			var prevDepositCount int64
+			tx.Raw("SELECT COUNT(*) FROM transactions WHERE member_id = ? AND type = 'deposit' AND created_at < ?", memberID, now).Scan(&prevDepositCount)
+
+			if prevDepositCount == 0 {
+				// ─── คำนวณโบนัส ──────────────────────────────
+				var bonusPercentStr, bonusMaxStr, turnoverStr string
+				tx.Table("settings").Select("value").Where("`key` = 'first_deposit_bonus_percent'").Scan(&bonusPercentStr)
+				tx.Table("settings").Select("value").Where("`key` = 'first_deposit_bonus_max'").Scan(&bonusMaxStr)
+				tx.Table("settings").Select("value").Where("`key` = 'first_deposit_bonus_turnover'").Scan(&turnoverStr)
+
+				bonusPercent := parseFloat(bonusPercentStr, 100) // default 100%
+				bonusMax := parseFloat(bonusMaxStr, 500)         // default สูงสุด 500 บาท
+				turnoverMultiplier := parseFloat(turnoverStr, 5) // default 5 เท่า
+
+				// คำนวณโบนัส: amount * percent / 100, cap ที่ max
+				bonus := amount * bonusPercent / 100
+				if bonus > bonusMax {
+					bonus = bonusMax
+				}
+
+				if bonus > 0 {
+					// เพิ่มโบนัสให้สมาชิก
+					balanceAfterDeposit := balanceBefore + amount
+					tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", bonus, memberID)
+
+					// สร้าง bonus transaction
+					tx.Exec(`INSERT INTO transactions (member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+						VALUES (?, 'bonus', ?, ?, ?, 'first_deposit', ?, ?)`,
+						memberID, bonus, balanceAfterDeposit, balanceAfterDeposit+bonus, "โบนัสฝากครั้งแรก", now)
+
+					// ─── ตั้ง turnover requirement ───────────
+					// turnover = (ยอดฝาก + โบนัส) * turnover_multiplier
+					turnoverRequired := (amount + bonus) * turnoverMultiplier
+					tx.Exec("UPDATE members SET turnover_required = ?, turnover_completed = 0 WHERE id = ?", turnoverRequired, memberID)
+
+					log.Printf("🎁 First deposit bonus: member=%d, deposit=%.2f, bonus=%.2f, turnover_req=%.2f",
+						memberID, amount, bonus, turnoverRequired)
+				}
+			}
+		}
+	}
+
 	tx.Commit()
 	ok(c, gin.H{"id": id, "status": "approved", "amount": amount, "member_id": memberID})
 }
@@ -1840,6 +1987,12 @@ func (h *Handler) ListYeekeeRounds(c *gin.Context) {
 
 	query := h.DB.Model(&model.YeekeeRound{})
 
+	// ⭐ Multi-agent: filter ตาม agent_id (query param หรือ default=1)
+	if aidStr := c.Query("agent_id"); aidStr != "" {
+		aid, _ := strconv.ParseInt(aidStr, 10, 64)
+		if aid > 0 { query = query.Where("agent_id = ?", aid) }
+	}
+
 	// Filter by status
 	if s := c.Query("status"); s != "" {
 		query = query.Where("status = ?", s)
@@ -1849,7 +2002,6 @@ func (h *Handler) ListYeekeeRounds(c *gin.Context) {
 	if d := c.Query("date"); d != "" {
 		query = query.Where("DATE(start_time) = ?", d)
 	} else {
-		// Default: วันนี้
 		today := time.Now().Format("2006-01-02")
 		query = query.Where("DATE(start_time) = ?", today)
 	}
@@ -1948,21 +2100,37 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 		Profit         float64 `json:"profit"`
 	}
 
-	// นับรอบตาม status
-	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today).Count(&stats.TotalRounds)
-	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ? AND status = ?", today, "waiting").Count(&stats.WaitingCount)
-	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ? AND status = ?", today, "shooting").Count(&stats.ShootingCount)
-	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ? AND status = ?", today, "resulted").Count(&stats.ResultedCount)
+	// ⭐ Multi-agent: base query filter
+	baseQuery := h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today)
+	if aidStr := c.Query("agent_id"); aidStr != "" {
+		aid, _ := strconv.ParseInt(aidStr, 10, 64)
+		if aid > 0 { baseQuery = baseQuery.Where("agent_id = ?", aid) }
+	}
 
-	// นับ shoots วันนี้
-	h.DB.Model(&model.YeekeeShoot{}).
+	// นับรอบตาม status
+	baseQuery.Session(&gorm.Session{}).Count(&stats.TotalRounds)
+	baseQuery.Session(&gorm.Session{}).Where("status = ?", "waiting").Count(&stats.WaitingCount)
+	baseQuery.Session(&gorm.Session{}).Where("status = ?", "shooting").Count(&stats.ShootingCount)
+	baseQuery.Session(&gorm.Session{}).Where("status = ?", "resulted").Count(&stats.ResultedCount)
+
+	// นับ shoots วันนี้ (filter agent ผ่าน yeekee_rounds join)
+	shootQuery := h.DB.Model(&model.YeekeeShoot{}).
 		Joins("JOIN yeekee_rounds ON yeekee_shoots.yeekee_round_id = yeekee_rounds.id").
-		Where("DATE(yeekee_rounds.start_time) = ?", today).
-		Count(&stats.TotalShoots)
+		Where("DATE(yeekee_rounds.start_time) = ?", today)
+	if aidStr := c.Query("agent_id"); aidStr != "" {
+		aid, _ := strconv.ParseInt(aidStr, 10, 64)
+		if aid > 0 { shootQuery = shootQuery.Where("yeekee_rounds.agent_id = ?", aid) }
+	}
+	shootQuery.Count(&stats.TotalShoots)
 
 	// สถิติ bets — ดึงเฉพาะ bets ของรอบยี่กีวันนี้
 	var yeekeeRoundIDs []int64
-	h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today).Pluck("lottery_round_id", &yeekeeRoundIDs)
+	pluckQuery := h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today)
+	if aidStr := c.Query("agent_id"); aidStr != "" {
+		aid, _ := strconv.ParseInt(aidStr, 10, 64)
+		if aid > 0 { pluckQuery = pluckQuery.Where("agent_id = ?", aid) }
+	}
+	pluckQuery.Pluck("lottery_round_id", &yeekeeRoundIDs)
 
 	if len(yeekeeRoundIDs) > 0 {
 		h.DB.Model(&model.Bet{}).Where("lottery_round_id IN ?", yeekeeRoundIDs).Count(&stats.TotalBets)
@@ -2279,4 +2447,96 @@ func (h *Handler) GetAvailablePermissions(c *gin.Context) {
 	}
 
 	ok(c, permissions)
+}
+
+// =============================================================================
+// Yeekee Agent Config — เปิด/ปิดยี่กี per agent
+// =============================================================================
+
+// GetYeekeeAgentConfig ดูว่า agent ไหนเปิดยี่กีอยู่
+// GET /api/v1/yeekee/config
+//
+// Response: array ของ { agent_id, agent_name, lottery_type_id, enabled }
+func (h *Handler) GetYeekeeAgentConfig(c *gin.Context) {
+	// ดึง YEEKEE lottery type ID
+	var yeekeeTypeID int64
+	h.DB.Table("lottery_types").Select("id").Where("code = ?", "YEEKEE").Scan(&yeekeeTypeID)
+	if yeekeeTypeID == 0 {
+		fail(c, 404, "YEEKEE lottery type not found"); return
+	}
+
+	// ดึง agents ทั้งหมด + สถานะยี่กี (LEFT JOIN agent_lottery_config)
+	type AgentConfig struct {
+		AgentID   int64  `json:"agent_id"`
+		AgentName string `json:"agent_name"`
+		AgentCode string `json:"agent_code"`
+		Enabled   bool   `json:"enabled"`
+	}
+
+	var configs []AgentConfig
+	h.DB.Raw(`
+		SELECT
+			a.id AS agent_id, a.name AS agent_name, a.code AS agent_code,
+			COALESCE(alc.enabled, 0) AS enabled
+		FROM agents a
+		LEFT JOIN agent_lottery_config alc
+			ON alc.agent_id = a.id AND alc.lottery_type_id = ?
+		WHERE a.status = 'active'
+		ORDER BY a.id
+	`, yeekeeTypeID).Scan(&configs)
+
+	ok(c, gin.H{
+		"lottery_type_id": yeekeeTypeID,
+		"agents":          configs,
+	})
+}
+
+// SetYeekeeAgentConfig เปิด/ปิดยี่กี สำหรับ agent
+// POST /api/v1/yeekee/config
+// Body: { "agent_id": 1, "enabled": true }
+//
+// ⭐ ใช้ UPSERT — ถ้ายังไม่มี row ใน agent_lottery_config → สร้าง, ถ้ามีแล้ว → update
+func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
+	var req struct {
+		AgentID int64 `json:"agent_id" binding:"required"`
+		Enabled bool  `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
+
+	// ดึง YEEKEE lottery type ID
+	var yeekeeTypeID int64
+	h.DB.Table("lottery_types").Select("id").Where("code = ?", "YEEKEE").Scan(&yeekeeTypeID)
+	if yeekeeTypeID == 0 {
+		fail(c, 404, "YEEKEE lottery type not found"); return
+	}
+
+	// เช็คว่า agent มีจริง
+	var agentExists int64
+	h.DB.Table("agents").Where("id = ? AND status = ?", req.AgentID, "active").Count(&agentExists)
+	if agentExists == 0 {
+		fail(c, 404, "agent not found"); return
+	}
+
+	// UPSERT: INSERT ... ON DUPLICATE KEY UPDATE
+	enabledInt := 0
+	if req.Enabled { enabledInt = 1 }
+
+	h.DB.Exec(`
+		INSERT INTO agent_lottery_config (agent_id, lottery_type_id, enabled, created_at)
+		VALUES (?, ?, ?, NOW())
+		ON DUPLICATE KEY UPDATE enabled = ?
+	`, req.AgentID, yeekeeTypeID, enabledInt, enabledInt)
+
+	action := "ปิด"
+	if req.Enabled { action = "เปิด" }
+	log.Printf("🎯 Yeekee %s for agent %d", action, req.AgentID)
+
+	ok(c, gin.H{
+		"agent_id":        req.AgentID,
+		"lottery_type_id": yeekeeTypeID,
+		"enabled":         req.Enabled,
+		"message":         action + "ยี่กีสำเร็จ",
+	})
 }

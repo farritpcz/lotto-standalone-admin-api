@@ -88,6 +88,7 @@ type BetType struct {
 
 type LotteryRound struct {
 	ID            int64      `gorm:"primaryKey" json:"id"`
+	AgentID       *int64     `gorm:"index" json:"agent_id,omitempty"` // NULL=global, NOT NULL=per-agent (yeekee)
 	LotteryTypeID int64      `gorm:"not null;index" json:"lottery_type_id"`
 	RoundNumber   string     `gorm:"size:50;not null" json:"round_number"`
 	RoundDate     time.Time  `gorm:"type:date;not null" json:"round_date"`
@@ -97,6 +98,8 @@ type LotteryRound struct {
 	ResultTop3    *string    `gorm:"column:result_top3;size:3" json:"result_top3"`
 	ResultTop2    *string    `gorm:"column:result_top2;size:2" json:"result_top2"`
 	ResultBottom2 *string    `gorm:"column:result_bottom2;size:2" json:"result_bottom2"`
+	ResultFront3  *string    `gorm:"column:result_front3;size:3" json:"result_front3"`   // 3 ตัวหน้า (หวยไทย)
+	ResultBottom3 *string    `gorm:"column:result_bottom3;size:100" json:"result_bottom3"` // 3 ตัวล่าง (comma-separated, หวยไทย)
 	ResultedAt    *time.Time `json:"resulted_at"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
@@ -216,6 +219,7 @@ func (ReferralCommission) TableName() string { return "referral_commissions" }
 // table: yeekee_rounds
 type YeekeeRound struct {
 	ID             int64     `gorm:"primaryKey" json:"id"`
+	AgentID        int64     `gorm:"not null;index" json:"agent_id"` // ⭐ รอบนี้เป็นของ agent ไหน
 	LotteryRoundID int64     `gorm:"not null;index" json:"lottery_round_id"`
 	RoundNo        int       `gorm:"not null" json:"round_no"`
 	StartTime      time.Time `gorm:"not null" json:"start_time"`
