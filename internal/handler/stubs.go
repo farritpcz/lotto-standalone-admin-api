@@ -565,12 +565,48 @@ func (h *Handler) CreateLottery(c *gin.Context) {
 	ok(c, lt)
 }
 
+// UpdateLottery อัพเดทประเภทหวย — partial update
+// ⭐ รับเฉพาะ fields ที่ส่งมา (ไม่ต้องส่งทุก field)
+// ใช้สำหรับ: toggle status, แก้ชื่อ, แก้ category ฯลฯ
 func (h *Handler) UpdateLottery(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	// ⭐ ตรวจว่ามี lottery นี้อยู่จริง
 	var lt model.LotteryType
-	if err := h.DB.First(&lt, id).Error; err != nil { fail(c, 404, "not found"); return }
-	if err := c.ShouldBindJSON(&lt); err != nil { fail(c, 400, err.Error()); return }
-	h.DB.Save(&lt)
+	if err := h.DB.First(&lt, id).Error; err != nil {
+		fail(c, 404, "not found")
+		return
+	}
+
+	// ⭐ ใช้ map สำหรับ partial update (ไม่ bind ลง model ตรง เพราะจะ overwrite ค่าว่าง)
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+
+	// อนุญาตเฉพาะ fields ที่แก้ได้
+	allowed := map[string]bool{
+		"name": true, "code": true, "category": true,
+		"description": true, "icon": true, "status": true,
+		"is_auto_result": true, "image_url": true,
+	}
+	updates := map[string]interface{}{}
+	for k, v := range req {
+		if allowed[k] {
+			updates[k] = v
+		}
+	}
+
+	if len(updates) == 0 {
+		fail(c, 400, "ไม่มีข้อมูลให้อัพเดท")
+		return
+	}
+
+	h.DB.Model(&lt).Updates(updates)
+
+	// โหลดข้อมูลล่าสุดส่งกลับ
+	h.DB.First(&lt, id)
 	ok(c, lt)
 }
 
