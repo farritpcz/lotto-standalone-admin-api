@@ -135,8 +135,15 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.GET("/rates", h.ListRates)
 			protected.PUT("/rates/:id", h.UpdateRate)
 
-			// Bets
-			protected.GET("/bets", h.ListAllBets)
+			// Bets — รายการเดิมพัน + ยกเลิก + ประวัติ
+			bets := protected.Group("/bets")
+			{
+				bets.GET("", h.ListAllBets)
+				bets.GET("/bill/:batchId", h.GetBillDetail)
+				bets.PUT("/bill/:batchId/cancel", h.CancelBill)
+				bets.GET("/:id/logs", h.GetBetLogs)
+				bets.PUT("/:id/cancel", h.CancelBet)
+			}
 
 			// Transactions
 			protected.GET("/transactions", h.ListAllTransactions)
@@ -157,6 +164,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			deposits := protected.Group("/deposits")
 			{
 				deposits.GET("", h.ListDepositRequests)
+				deposits.GET("/:id/logs", h.GetDepositLogs)
 				deposits.PUT("/:id/approve", h.ApproveDeposit)
 				deposits.PUT("/:id/reject", h.RejectDeposit)
 				deposits.PUT("/:id/cancel", h.CancelDeposit)
@@ -166,6 +174,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			withdrawals := protected.Group("/withdrawals")
 			{
 				withdrawals.GET("", h.ListWithdrawRequests)
+				withdrawals.GET("/:id/logs", h.GetWithdrawLogs)
 				withdrawals.PUT("/:id/approve", h.ApproveWithdraw)
 				withdrawals.PUT("/:id/reject", h.RejectWithdraw)
 			}
@@ -255,6 +264,7 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				yeekee.GET("/rounds", h.ListYeekeeRounds)           // รายการรอบ (paginated + filter)
 				yeekee.GET("/rounds/:id", h.GetYeekeeRoundDetail)   // รอบเดียว + shoots
 				yeekee.GET("/rounds/:id/shoots", h.ListYeekeeShoots) // เลขยิงในรอบ (paginated)
+				yeekee.POST("/rounds/:id/settle", h.ManualSettleYeekeeRound) // ⭐ แอดมินกดออกผล manual (รอบ missed)
 				yeekee.GET("/stats", h.GetYeekeeStats)              // สถิติวันนี้
 				yeekee.GET("/config", h.GetYeekeeAgentConfig)       // ⭐ ดูว่า agent ไหนเปิดยี่กี
 				yeekee.POST("/config", h.SetYeekeeAgentConfig)      // ⭐ เปิด/ปิดยี่กี per agent
@@ -271,6 +281,27 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				staff.DELETE("/:id", h.DeleteStaff)
 				staff.GET("/:id/login-history", h.GetStaffLoginHistory)
 				staff.GET("/:id/activity", h.GetStaffActivity)
+			}
+
+			// ⭐ Agent Downline — ระบบปล่อยสาย (Hierarchical Profit Sharing)
+			// โครงสร้าง: admin → share_holder → senior → master → agent → agent_downline
+			// กำไร = ส่วนต่าง % ระหว่างตัวเองกับลูก
+			downline := protected.Group("/downline")
+			{
+				// Tree view — ดึง tree ทั้งหมด (hierarchical)
+				downline.GET("/tree", h.GetDownlineTree)
+				// Nodes CRUD — จัดการ node ในสายงาน
+				downline.GET("/nodes", h.ListDownlineNodes)
+				downline.GET("/nodes/:id", h.GetDownlineNode)
+				downline.POST("/nodes", h.CreateDownlineNode)
+				downline.PUT("/nodes/:id", h.UpdateDownlineNode)
+				downline.DELETE("/nodes/:id", h.DeleteDownlineNode)
+				// Commission Settings — ตั้ง % แยกตามประเภทหวย
+				downline.GET("/nodes/:id/commission", h.GetNodeCommissionSettings)
+				downline.PUT("/nodes/:id/commission", h.UpdateNodeCommissionSettings)
+				// Profit Reports — รายงานกำไร
+				downline.GET("/profits", h.GetDownlineProfits)
+				downline.GET("/profits/:nodeId", h.GetNodeProfits)
 			}
 
 			// Affiliate Settings — commission rates + withdrawal conditions
@@ -292,6 +323,29 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				affiliate.POST("/adjustments", h.CreateCommissionAdjustment)
 			}
 		}
+	}
+
+	// =================================================================
+	// ⭐ Node Portal — login + ดูสายงาน + CRUD ลูกตรง + ดูกำไร
+	// แยกจาก admin routes — ใช้ JWT "node_token" cookie
+	// กฎ: เห็นทั้งสาย, แก้ไขได้เฉพาะลูกตรง, หลาน = read-only
+	// =================================================================
+	nodeAuth := api.Group("/node/auth")
+	{
+		nodeAuth.POST("/login", h.NodeLogin)
+		nodeAuth.POST("/logout", h.NodeLogout)
+	}
+
+	nodeProtected := api.Group("/node")
+	nodeProtected.Use(mw.NodeJWTAuth(h.AdminJWTSecret))
+	{
+		nodeProtected.GET("/me", h.NodeGetMe)
+		nodeProtected.GET("/tree", h.NodeGetTree)
+		nodeProtected.GET("/children", h.NodeListChildren)
+		nodeProtected.POST("/children", h.NodeCreateChild)
+		nodeProtected.PUT("/children/:id", h.NodeUpdateChild)
+		nodeProtected.DELETE("/children/:id", h.NodeDeleteChild)
+		nodeProtected.GET("/profits", h.NodeGetProfits)
 	}
 
 	// Static files — serve uploaded images

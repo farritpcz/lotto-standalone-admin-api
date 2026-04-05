@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 // =============================================================================
@@ -35,6 +37,8 @@ import (
 //   per_page   — จำนวนต่อหน้า (default: 50)
 // =============================================================================
 func (h *Handler) GetMemberCreditReport(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope — ห้ามดูเครดิต member ข้ามเว็บ
+
 	// ─── 1. Parse parameters ─────────────────────────────────────────────
 	memberIDStr := c.Query("member_id")
 	search := c.Query("q")
@@ -62,6 +66,12 @@ func (h *Handler) GetMemberCreditReport(c *gin.Context) {
 
 	if memberID == 0 {
 		fail(c, 404, "ไม่พบสมาชิก")
+		return
+	}
+
+	// ⭐ scope: ห้ามดูเครดิต member ข้ามเว็บ
+	if !scope.HasMember(memberID) {
+		fail(c, 403, "ไม่มีสิทธิ์เข้าถึงสมาชิกนี้")
 		return
 	}
 

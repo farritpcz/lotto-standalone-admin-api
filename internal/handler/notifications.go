@@ -23,10 +23,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 // =============================================================================
@@ -59,12 +62,31 @@ type notifyGroup struct {
 // =============================================================================
 const notifyGroupsKey = "notify_groups"
 
+// ⭐ notifyKey คืน key สำหรับ settings table — แยกตาม node
+// admin → "notify_groups" (เดิม)
+// node → "notify_groups_node_9" (แยกเว็บใครเว็บมัน)
+func notifyKey(c *gin.Context, db interface{ }) string {
+	return notifyGroupsKey
+}
+func notifyKeyScoped(c *gin.Context, h *Handler) string {
+	scope := mw.GetNodeScope(c, h.DB)
+	if scope.IsNode {
+		return notifyGroupsKey + "_node_" + strconv.FormatInt(scope.NodeID, 10)
+	}
+	return notifyGroupsKey
+}
+
 // =============================================================================
 // loadNotifyGroups — helper โหลดกลุ่มทั้งหมดจาก DB
 // =============================================================================
 func (h *Handler) loadNotifyGroups() []notifyGroup {
+	return h.loadNotifyGroupsByKey(notifyGroupsKey)
+}
+
+// loadNotifyGroupsByKey — helper โหลดกลุ่มจาก DB ด้วย key ที่กำหนด
+func (h *Handler) loadNotifyGroupsByKey(key string) []notifyGroup {
 	var raw string
-	h.DB.Table("settings").Select("value").Where("`key` = ?", notifyGroupsKey).Row().Scan(&raw)
+	h.DB.Table("settings").Select("value").Where("`key` = ?", key).Row().Scan(&raw)
 	if raw == "" {
 		return []notifyGroup{}
 	}
@@ -74,16 +96,16 @@ func (h *Handler) loadNotifyGroups() []notifyGroup {
 }
 
 // =============================================================================
-// saveNotifyGroups — helper บันทึกกลุ่มทั้งหมดลง DB
+// saveNotifyGroupsByKey — helper บันทึกกลุ่มลง DB ด้วย key ที่กำหนด
 // =============================================================================
-func (h *Handler) saveNotifyGroups(groups []notifyGroup) error {
+func (h *Handler) saveNotifyGroupsByKey(key string, groups []notifyGroup) error {
 	raw, err := json.Marshal(groups)
 	if err != nil {
 		return err
 	}
 	return h.DB.Exec(
 		"INSERT INTO settings (`key`, value, description, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
-		notifyGroupsKey, string(raw), "Telegram notification groups (multi-group)", time.Now(),
+		key, string(raw), "Telegram notification groups", time.Now(),
 	).Error
 }
 
@@ -93,7 +115,9 @@ func (h *Handler) saveNotifyGroups(groups []notifyGroup) error {
 //    ถ้ามีแค่ notify_config (format เก่า) ให้แปลงเป็น group 1 กลุ่ม
 // =============================================================================
 func (h *Handler) GetNotificationConfig(c *gin.Context) {
-	groups := h.loadNotifyGroups()
+	// ⭐ scope: เว็บใครเว็บมัน — ใช้ key แยกตาม node
+	key := notifyKeyScoped(c, h)
+	groups := h.loadNotifyGroupsByKey(key)
 
 	// ⭐ ถ้ายังไม่มี groups → ลองอ่าน config เก่า (single) แปลงเป็น group
 	if len(groups) == 0 {
@@ -150,7 +174,9 @@ func (h *Handler) UpdateNotificationConfig(c *gin.Context) {
 		}
 	}
 
-	if err := h.saveNotifyGroups(groups); err != nil {
+	// ⭐ scope: บันทึกตาม key ของเว็บ
+	key := notifyKeyScoped(c, h)
+	if err := h.saveNotifyGroupsByKey(key, groups); err != nil {
 		fail(c, 500, "บันทึกไม่สำเร็จ: "+err.Error())
 		return
 	}
@@ -168,7 +194,8 @@ func (h *Handler) TestNotification(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 
-	groups := h.loadNotifyGroups()
+	key := notifyKeyScoped(c, h) // ⭐ scope
+	groups := h.loadNotifyGroupsByKey(key)
 
 	// ⭐ ถ้าไม่ส่ง group_id → ส่งไปกลุ่มแรกที่มี token + chat_id
 	var target *notifyGroup

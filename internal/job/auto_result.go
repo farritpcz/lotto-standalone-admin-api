@@ -347,6 +347,9 @@ func settleStockRound(db *gorm.DB, roundID, lotteryTypeID int64, roundNumber, to
 	// ─── 6. Commission ─────────────────────────────────────
 	go CalculateCommissions(db, roundID, 1)
 
+	// ─── 7. Downline Profit Sharing ─────────────────────────
+	go CalculateDownlineProfits(db, roundID, 1)
+
 	log.Printf("✅ Stock auto-result complete: %s → %s (winners: %d, payout: %.2f)",
 		roundNumber, top3, output.TotalWinners, output.TotalWinAmount)
 }

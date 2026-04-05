@@ -20,6 +20,7 @@ package job
 
 import (
 	"log"
+	"math"
 	"time"
 
 	"gorm.io/gorm"
@@ -182,4 +183,187 @@ func CalculateCommissions(db *gorm.DB, roundID, agentID int64) {
 		"[commission_job] round %d done: rate=%.2f%%, inserted=%d, skipped=%d",
 		roundID, commissionRate, inserted, skipped,
 	)
+}
+
+// =============================================================================
+// CalculateDownlineProfits คำนวณกำไร/ขาดทุนของทุก node ในสายงาน
+//
+// เรียกจาก: SubmitResult() หลังจาก CalculateCommissions
+// Run ใน goroutine แยก → ไม่ block response
+//
+// Flow:
+//  1. ดึง bets ที่ settled (won/lost)
+//  2. หา member → agent_node_id (ลูกค้าอยู่ใต้ node ไหน)
+//  3. Walk up tree: จาก leaf node → root
+//  4. ���ต่ละ node: profit = netResult × (myPercent - childPercent) / 100
+//  5. Insert agent_profit_transactions (dedup by bet_id + agent_node_id)
+//
+// ตัวอย่าง: ลูกค้าเล่นเสีย 100 บาท ใต้ agent_downline(91%)
+//   agent_downline(91%): diff=91%, profit = 100 × 91% = 91 บาท
+//   agent(92%):          diff=1%,  profit = 100 × 1%  = 1  บาท
+//   master(93%):         diff=1%,  profit = 100 × 1%  = 1  บาท
+//   senior(94%):         diff=1%,  profit = 100 × 1%  = 1  บาท
+//   share_holder(95%):   diff=1%,  profit = 100 × 1%  = 1  บาท
+//   admin(100%):         diff=5%,  profit = 100 × 5%  = 5  บาท
+//                                                  รวม = 100 ✓
+// =============================================================================
+func CalculateDownlineProfits(db *gorm.DB, roundID, agentID int64) {
+	// ── Step 1: ดึง round เพื่อรู้ lottery_type ──
+	var round model.LotteryRound
+	if err := db.First(&round, roundID).Error; err != nil {
+		log.Printf("[downline_profit] round %d not found: %v", roundID, err)
+		return
+	}
+
+	// ดึง lottery code สำหรับหา commission override
+	var lotteryType model.LotteryType
+	db.First(&lotteryType, round.LotteryTypeID)
+	lotteryCode := lotteryType.Code
+
+	// ── Step 2: ดึง bets ที่ settled ──
+	var bets []model.Bet
+	db.Where("lottery_round_id = ? AND status IN ?", roundID, []string{"won", "lost"}).Find(&bets)
+	if len(bets) == 0 {
+		log.Printf("[downline_profit] round %d: no settled bets", roundID)
+		return
+	}
+
+	// ── Step 3: หา member → agent_node_id ──
+	memberIDs := make([]int64, 0, len(bets))
+	seen := map[int64]bool{}
+	for _, b := range bets {
+		if !seen[b.MemberID] {
+			memberIDs = append(memberIDs, b.MemberID)
+			seen[b.MemberID] = true
+		}
+	}
+
+	type memberNodeInfo struct {
+		ID          int64  `gorm:"column:id"`
+		AgentNodeID *int64 `gorm:"column:agent_node_id"`
+	}
+	var memberNodes []memberNodeInfo
+	db.Raw("SELECT id, agent_node_id FROM members WHERE id IN ? AND agent_node_id IS NOT NULL", memberIDs).
+		Scan(&memberNodes)
+
+	memberNodeMap := map[int64]int64{} // member_id → agent_node_id
+	for _, mn := range memberNodes {
+		if mn.AgentNodeID != nil {
+			memberNodeMap[mn.ID] = *mn.AgentNodeID
+		}
+	}
+
+	if len(memberNodeMap) == 0 {
+		log.Printf("[downline_profit] round %d: no members in downline", roundID)
+		return
+	}
+
+	// ── Step 4: ดึง agent_nodes ทั้งหมด (build tree in memory) ──
+	var allNodes []model.AgentNode
+	db.Where("agent_id = ?", agentID).Find(&allNodes)
+
+	nodeMap := map[int64]*model.AgentNode{}
+	for i := range allNodes {
+		nodeMap[allNodes[i].ID] = &allNodes[i]
+	}
+
+	// ── Step 5: ดึง commission overrides (per lottery type) ──
+	var overrides []model.AgentNodeCommissionSetting
+	db.Where("lottery_type = ?", lotteryCode).Find(&overrides)
+	overrideMap := map[int64]float64{} // node_id → share_percent override
+	for _, o := range overrides {
+		overrideMap[o.AgentNodeID] = o.SharePercent
+	}
+
+	// Helper: ดึง share_percent (ใช้ override ถ้ามี, ไม่มีใช้ค่าหลัก)
+	getSharePercent := func(nodeID int64) float64 {
+		if pct, ok := overrideMap[nodeID]; ok {
+			return pct
+		}
+		if n, ok := nodeMap[nodeID]; ok {
+			return n.SharePercent
+		}
+		return 0
+	}
+
+	// ── Step 6: คำนวณ profit ทุก bet × ทุก node ──
+	now := time.Now()
+	inserted := 0
+
+	for _, bet := range bets {
+		nodeID, hasNode := memberNodeMap[bet.MemberID]
+		if !hasNode {
+			continue
+		}
+
+		// net_result: + = ลูกค้าเสีย (เราได้กำไร), - = ลูกค้าชนะ (เราขาดทุน)
+		var netResult float64
+		if bet.Status == "lost" {
+			netResult = bet.Amount // ลูกค้าเสีย = +
+		} else {
+			netResult = bet.Amount - bet.WinAmount // ลูกค้าชนะ = มักเป็น -
+		}
+
+		// Walk up tree: leaf → root
+		currentNodeID := nodeID
+		childPercent := 0.0 // leaf: member ไม่มี % (ไม่ใช่ node)
+
+		for currentNodeID != 0 {
+			currentNode, exists := nodeMap[currentNodeID]
+			if !exists {
+				break
+			}
+
+			myPercent := getSharePercent(currentNodeID)
+			diffPercent := myPercent - childPercent
+			profitAmount := math.Round(netResult*diffPercent/100*100) / 100
+
+			// Dedup check
+			var existing int64
+			db.Model(&model.AgentProfitTransaction{}).
+				Where("bet_id = ? AND agent_node_id = ?", bet.ID, currentNodeID).
+				Count(&existing)
+			if existing > 0 {
+				if currentNode.ParentID != nil {
+					childPercent = myPercent
+					currentNodeID = *currentNode.ParentID
+					continue
+				}
+				break
+			}
+
+			// Insert profit record
+			pt := model.AgentProfitTransaction{
+				AgentID:      agentID,
+				RoundID:      roundID,
+				BetID:        bet.ID,
+				AgentNodeID:  currentNodeID,
+				FromNodeID:   nil,
+				MemberID:     bet.MemberID,
+				BetAmount:    bet.Amount,
+				NetResult:    netResult,
+				MyPercent:    myPercent,
+				ChildPercent: childPercent,
+				DiffPercent:  diffPercent,
+				ProfitAmount: profitAmount,
+				CreatedAt:    now,
+			}
+
+			if err := db.Create(&pt).Error; err != nil {
+				log.Printf("[downline_profit] bet %d node %d: %v", bet.ID, currentNodeID, err)
+			} else {
+				inserted++
+			}
+
+			// เดินขึ้น parent
+			if currentNode.ParentID != nil {
+				childPercent = myPercent
+				currentNodeID = *currentNode.ParentID
+			} else {
+				break
+			}
+		}
+	}
+
+	log.Printf("[downline_profit] round %d: inserted %d profit records", roundID, inserted)
 }

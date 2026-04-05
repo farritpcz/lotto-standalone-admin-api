@@ -13,6 +13,7 @@ type Admin struct {
 	PasswordHash string     `gorm:"size:255;not null" json:"-"`
 	Name         string     `gorm:"size:100" json:"name"`
 	Role         string     `gorm:"size:20;not null;default:admin" json:"role"`   // owner, admin, operator, viewer
+	AgentNodeID  *int64     `gorm:"index" json:"agent_node_id"`                   // ⭐ NULL=ระบบ, มีค่า=สร้างโดย node นี้
 	Permissions  string     `gorm:"type:text" json:"permissions"`                 // JSON array เช่น ["members.view","deposits.approve"]
 	Status       string     `gorm:"size:20;not null;default:active" json:"status"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
@@ -110,6 +111,7 @@ type LotteryRound struct {
 
 type PayRate struct {
 	ID              int64     `gorm:"primaryKey" json:"id"`
+	AgentNodeID     *int64    `gorm:"index" json:"agent_node_id"`                          // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
 	LotteryTypeID   int64     `gorm:"not null" json:"lottery_type_id"`
 	BetTypeID       int64     `gorm:"not null" json:"bet_type_id"`
 	Rate            float64   `gorm:"type:decimal(10,2);not null" json:"rate"`
@@ -124,15 +126,19 @@ type PayRate struct {
 
 type Bet struct {
 	ID             int64      `gorm:"primaryKey" json:"id"`
+	BatchID        string     `gorm:"size:36;index" json:"batch_id"`
 	MemberID       int64      `gorm:"not null;index" json:"member_id"`
 	LotteryRoundID int64      `gorm:"not null;index" json:"lottery_round_id"`
 	BetTypeID      int64      `gorm:"not null" json:"bet_type_id"`
 	Number         string     `gorm:"size:10;not null" json:"number"`
 	Amount         float64    `gorm:"type:decimal(15,2);not null" json:"amount"`
 	Rate           float64    `gorm:"type:decimal(10,2);not null" json:"rate"`
-	Status         string     `gorm:"size:20;not null;default:pending" json:"status"`
+	Status         string     `gorm:"size:20;not null;default:pending" json:"status"` // pending, won, lost, cancelled
 	WinAmount      float64    `gorm:"type:decimal(15,2);not null;default:0" json:"win_amount"`
 	SettledAt      *time.Time `json:"settled_at"`
+	CancelledAt    *time.Time `json:"cancelled_at"`
+	CancelledBy    *int64     `json:"cancelled_by"`
+	CancelReason   string     `gorm:"type:text" json:"cancel_reason,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	// Relations
 	Member       *Member       `gorm:"foreignKey:MemberID" json:"member,omitempty"`
@@ -145,6 +151,7 @@ type NumberBan struct {
 	LotteryTypeID  int64     `gorm:"not null" json:"lottery_type_id"`
 	LotteryRoundID *int64    `json:"lottery_round_id"`
 	BetTypeID      int64     `gorm:"not null" json:"bet_type_id"`
+	AgentNodeID    *int64    `gorm:"index" json:"agent_node_id"` // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
 	Number         string    `gorm:"size:10;not null" json:"number"`
 	BanType        string    `gorm:"size:20;not null;default:full_ban" json:"ban_type"`
 	ReducedRate    float64   `gorm:"type:decimal(10,2);not null;default:0" json:"reduced_rate"`
@@ -180,6 +187,7 @@ type Setting struct {
 type AffiliateSettings struct {
 	ID             int64      `gorm:"primaryKey" json:"id"`
 	AgentID        int64      `gorm:"not null;default:1;index" json:"agent_id"`
+	AgentNodeID    *int64     `gorm:"index" json:"agent_node_id"`                // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
 	LotteryTypeID  *int64     `gorm:"index" json:"lottery_type_id,omitempty"`
 	CommissionRate float64    `gorm:"type:decimal(5,2);not null;default:0" json:"commission_rate"`
 	WithdrawalMin  float64    `gorm:"type:decimal(15,2);not null;default:1" json:"withdrawal_min"`
@@ -227,6 +235,8 @@ type YeekeeRound struct {
 	EndTime        time.Time `gorm:"not null" json:"end_time"`
 	Status         string    `gorm:"size:20;not null;default:waiting" json:"status"`
 	ResultNumber   string    `gorm:"size:5" json:"result_number"`
+	ServerSeed     string    `gorm:"size:64" json:"-"`          // 🔒 ไม่ส่งให้ client
+	SeedHash       string    `gorm:"size:64" json:"seed_hash"`  // public commitment
 	TotalShoots    int       `gorm:"default:0" json:"total_shoots"`
 	TotalSum       int64     `gorm:"default:0" json:"total_sum"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -245,6 +255,7 @@ type YeekeeShoot struct {
 	MemberID      int64     `gorm:"not null;index" json:"member_id"`
 	Number        string    `gorm:"size:5;not null" json:"number"`
 	ShotAt        time.Time `gorm:"not null" json:"shot_at"`
+	IsBot         bool      `gorm:"default:0;not null" json:"is_bot"` // ⭐ true = ยิงโดย bot
 	// Relations
 	Member *Member `gorm:"foreignKey:MemberID" json:"member,omitempty"`
 }
@@ -256,6 +267,7 @@ func (YeekeeShoot) TableName() string { return "yeekee_shoots" }
 type AutoBanRule struct {
 	ID              int64     `gorm:"primaryKey" json:"id"`
 	AgentID         int64     `gorm:"not null;default:1;index" json:"agent_id"`
+	AgentNodeID     *int64    `gorm:"index" json:"agent_node_id"` // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
 	LotteryTypeID   int64     `gorm:"not null;index" json:"lottery_type_id"`
 	BetType         string    `gorm:"size:30;not null" json:"bet_type"`
 	ThresholdAmount float64   `gorm:"type:decimal(15,2);not null" json:"threshold_amount"`
@@ -290,8 +302,9 @@ func (ActivityLog) TableName() string { return "activity_logs" }
 
 // ShareTemplate ข้อความสำเร็จรูปสำหรับแชร์ลิงก์เชิญ (admin สร้าง)
 type ShareTemplate struct {
-	ID        int64     `gorm:"primaryKey" json:"id"`
-	AgentID   int64     `gorm:"not null;index" json:"agent_id"`
+	ID          int64     `gorm:"primaryKey" json:"id"`
+	AgentID     int64     `gorm:"not null;index" json:"agent_id"`
+	AgentNodeID *int64    `gorm:"index" json:"agent_node_id"` // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
 	Name      string    `gorm:"size:100;not null" json:"name"`
 	Content   string    `gorm:"type:text;not null" json:"content"` // placeholder: {link}, {code}, {username}
 	Platform  string    `gorm:"size:30;not null;default:all" json:"platform"`
@@ -321,3 +334,110 @@ type CommissionAdjustment struct {
 }
 
 func (CommissionAdjustment) TableName() string { return "commission_adjustments" }
+
+// =============================================================================
+// Agent Downline Models — ระบบปล่อยสาย (Hierarchical Profit Sharing)
+// share DB กับ member-api (#3) — ดู model/downline.go ใน member-api
+// =============================================================================
+
+// AgentNode — 1 node ในสายงาน (tree structure)
+// table: agent_nodes
+// path: materialized path เช่น "/1/5/12/" ใช้ LIKE หาลูกทั้งหมด
+// share_percent: % ที่ถือ → กำไร = ส่วนต่างกับลูก
+type AgentNode struct {
+	ID           int64     `json:"id" gorm:"primaryKey"`
+	AgentID      int64     `json:"agent_id" gorm:"not null;index"`
+	ParentID     *int64    `json:"parent_id" gorm:"index"`
+	Role         string    `json:"role" gorm:"size:20;not null"`
+	Name         string    `json:"name" gorm:"size:100;not null"`
+	Username     string    `json:"username" gorm:"size:50;not null"`
+	PasswordHash string    `json:"-" gorm:"size:255;not null"`
+	Depth        int       `json:"depth" gorm:"not null;default:0"`
+	Path         string    `json:"path" gorm:"size:500;not null;default:/"`
+	SharePercent float64   `json:"share_percent" gorm:"type:decimal(5,2);not null;default:100"`
+	Phone        string    `json:"phone" gorm:"size:20"`
+	LineID       string    `json:"line_id" gorm:"size:50"`
+	Note         string    `json:"note" gorm:"type:text"`
+	Status       string    `json:"status" gorm:"size:20;not null;default:active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	// Computed fields (ไม่อยู่ใน DB)
+	Children    []AgentNode `json:"children,omitempty" gorm:"-"`
+	MemberCount int64       `json:"member_count" gorm:"-"`
+	ChildCount  int64       `json:"child_count" gorm:"-"`
+	Parent      *AgentNode  `json:"parent,omitempty" gorm:"foreignKey:ParentID"`
+}
+
+func (AgentNode) TableName() string { return "agent_nodes" }
+
+// AgentNodeCommissionSetting — ตั้ง % แยกตามประเภทหวย (override)
+// table: agent_node_commission_settings
+type AgentNodeCommissionSetting struct {
+	ID           int64     `json:"id" gorm:"primaryKey"`
+	AgentNodeID  int64     `json:"agent_node_id" gorm:"not null;index"`
+	LotteryType  string    `json:"lottery_type" gorm:"size:50;not null"`
+	SharePercent float64   `json:"share_percent" gorm:"type:decimal(5,2);not null"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (AgentNodeCommissionSetting) TableName() string { return "agent_node_commission_settings" }
+
+// AgentProfitTransaction — บันทึกกำไร/ขาดทุนของ 1 node จาก 1 bet
+// table: agent_profit_transactions
+type AgentProfitTransaction struct {
+	ID           int64     `json:"id" gorm:"primaryKey"`
+	AgentID      int64     `json:"agent_id" gorm:"not null"`
+	RoundID      int64     `json:"round_id" gorm:"not null;index"`
+	BetID        int64     `json:"bet_id" gorm:"not null"`
+	AgentNodeID  int64     `json:"agent_node_id" gorm:"not null;index"`
+	FromNodeID   *int64    `json:"from_node_id"`
+	MemberID     int64     `json:"member_id" gorm:"not null;index"`
+	BetAmount    float64   `json:"bet_amount" gorm:"type:decimal(12,2);not null"`
+	NetResult    float64   `json:"net_result" gorm:"type:decimal(12,2);not null"`
+	MyPercent    float64   `json:"my_percent" gorm:"type:decimal(5,2);not null"`
+	ChildPercent float64   `json:"child_percent" gorm:"type:decimal(5,2);not null"`
+	DiffPercent  float64   `json:"diff_percent" gorm:"type:decimal(5,2);not null"`
+	ProfitAmount float64   `json:"profit_amount" gorm:"type:decimal(12,2);not null"`
+	CreatedAt    time.Time `json:"created_at"`
+	AgentNode    *AgentNode `json:"agent_node,omitempty" gorm:"foreignKey:AgentNodeID"`
+}
+
+func (AgentProfitTransaction) TableName() string { return "agent_profit_transactions" }
+
+// RoleHierarchy ลำดับยศ: index น้อย = สูงกว่า
+var RoleHierarchy = map[string]int{
+	"admin": 0, "share_holder": 1, "senior": 2,
+	"master": 3, "agent": 4, "agent_downline": 5,
+}
+
+// NextRole คืน role ถัดไปเมื่อสร้างลูก
+func NextRole(parentRole string) string {
+	switch parentRole {
+	case "admin":
+		return "share_holder"
+	case "share_holder":
+		return "senior"
+	case "senior":
+		return "master"
+	case "master":
+		return "agent"
+	default:
+		return "agent_downline"
+	}
+}
+
+// AdminActionLog บันทึก business action ที่แอดมินทำ (เช่น กดออกผลยี่กี manual)
+// table: admin_action_logs
+type AdminActionLog struct {
+	ID         int64     `gorm:"primaryKey" json:"id"`
+	AdminID    int64     `gorm:"not null;index" json:"admin_id"`
+	Action     string    `gorm:"size:100;not null;index" json:"action"`    // เช่น yeekee_manual_settle
+	TargetType string    `gorm:"size:50" json:"target_type"`               // เช่น yeekee_round
+	TargetID   int64     `json:"target_id"`
+	Details    string    `gorm:"type:json" json:"details"`                 // JSON รายละเอียด
+	IP         string    `gorm:"size:45" json:"ip"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func (AdminActionLog) TableName() string { return "admin_action_logs" }

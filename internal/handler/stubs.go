@@ -23,9 +23,11 @@ import (
 
 	"github.com/farritpcz/lotto-core/payout"
 	coreTypes "github.com/farritpcz/lotto-core/types"
+	"github.com/farritpcz/lotto-core/yeekee"
 
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/job"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/service"
 	rkautoLib "github.com/farritpcz/lotto-standalone-admin-api/internal/rkauto"
@@ -76,43 +78,88 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		fail(c, 400, err.Error()); return
 	}
 
+	// ⭐ ลอง admin ก่อน → ถ้าไม่เจอ → ลอง agent_nodes (สายงาน)
 	var admin model.Admin
-	if err := h.DB.Where("username = ?", req.Username).First(&admin).Error; err != nil {
-		fail(c, 401, "invalid credentials"); return
-	}
-	if bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)) != nil {
-		fail(c, 401, "invalid credentials"); return
-	}
-	if admin.Status != "active" {
-		fail(c, 403, "account suspended"); return
-	}
+	if err := h.DB.Where("username = ?", req.Username).First(&admin).Error; err == nil {
+		// === พบใน admins table ===
+		if bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)) != nil {
+			fail(c, 401, "invalid credentials"); return
+		}
+		if admin.Status != "active" {
+			fail(c, 403, "account suspended"); return
+		}
 
-	// อัพเดท last login + IP
-	now := time.Now()
-	ip := c.ClientIP()
-	h.DB.Model(&admin).Updates(map[string]interface{}{"last_login_at": &now, "last_login_ip": ip})
+		now := time.Now()
+		ip := c.ClientIP()
+		h.DB.Model(&admin).Updates(map[string]interface{}{"last_login_at": &now, "last_login_ip": ip})
+		h.DB.Create(&model.AdminLoginHistory{
+			AdminID: admin.ID, IP: ip, UserAgent: c.GetHeader("User-Agent"), Success: true, CreatedAt: now,
+		})
 
-	// บันทึก login history
-	h.DB.Create(&model.AdminLoginHistory{
-		AdminID:   admin.ID,
-		IP:        ip,
-		UserAgent: c.GetHeader("User-Agent"),
-		Success:   true,
-		CreatedAt: now,
-	})
+		// ⭐ เช็คว่าพนักงานนี้สร้างจากเว็บไหน (agent_node_id)
+		// ถ้ามี agent_node_id → login เป็น node user (เห็นเฉพาะข้อมูลเว็บนั้น)
+		// ถ้าไม่มี (NULL) → login เป็น admin ปกติ (เห็นทุกอย่าง)
+		if admin.AgentNodeID != nil {
+			// ⭐ พนักงานของเว็บ → สร้าง token ด้วย role="node" + AdminID = nodeID
+			nodeID := *admin.AgentNodeID
+			token, err := middleware.GenerateAdminToken(nodeID, admin.Username, "node", h.AdminJWTSecret, h.AdminJWTExpiryHours)
+			if err != nil {
+				fail(c, 500, "failed to generate token"); return
+			}
+			middleware.SetAdminTokenCookie(c, token, h.AdminJWTExpiryHours*3600, h.cookieConfig())
+			middleware.SetCSRFCookie(c, h.cookieConfig())
+			ok(c, gin.H{
+				"admin": admin, "token": token, "permissions": admin.Permissions,
+				"user_type": "node", "node_id": nodeID,
+			})
+			return
+		}
 
-	// สร้าง JWT token จริง
-	token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, admin.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
-	if err != nil {
-		fail(c, 500, "failed to generate token")
+		// ⭐ admin ระดับระบบ (ไม่มี agent_node_id) → login ปกติ
+		token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, admin.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
+		if err != nil {
+			fail(c, 500, "failed to generate token"); return
+		}
+
+		middleware.SetAdminTokenCookie(c, token, h.AdminJWTExpiryHours*3600, h.cookieConfig())
+		middleware.SetCSRFCookie(c, h.cookieConfig())
+		ok(c, gin.H{"admin": admin, "token": token, "permissions": admin.Permissions, "user_type": "admin"})
 		return
 	}
 
-	// ⭐ ตั้ง httpOnly cookie สำหรับ admin JWT token + CSRF cookie
-	middleware.SetAdminTokenCookie(c, token, h.AdminJWTExpiryHours*3600, h.cookieConfig())
+	// === ไม่เจอใน admins → ลอง agent_nodes (สายงาน) ===
+	var node model.AgentNode
+	if err := h.DB.Where("username = ?", req.Username).First(&node).Error; err != nil {
+		fail(c, 401, "invalid credentials"); return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(node.PasswordHash), []byte(req.Password)) != nil {
+		fail(c, 401, "invalid credentials"); return
+	}
+	if node.Status != "active" {
+		fail(c, 403, "บัญชีถูกระงับ — กรุณาติดต่อหัวสาย"); return
+	}
+
+	// สร้าง node_token + admin_token (role="node") เพื่อเข้า admin panel ได้
+	nodeToken, _ := middleware.GenerateNodeToken(node.ID, node.AgentID, node.Username, node.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
+	adminToken, _ := middleware.GenerateAdminToken(node.ID, node.Username, "node", h.AdminJWTSecret, h.AdminJWTExpiryHours)
+
+	maxAge := h.AdminJWTExpiryHours * 3600
+	middleware.SetNodeTokenCookie(c, nodeToken, maxAge, h.cookieConfig())
+	middleware.SetAdminTokenCookie(c, adminToken, maxAge, h.cookieConfig())
 	middleware.SetCSRFCookie(c, h.cookieConfig())
 
-	ok(c, gin.H{"admin": admin, "token": token, "permissions": admin.Permissions})
+	ok(c, gin.H{
+		"admin": gin.H{
+			"id": node.ID, "username": node.Username, "name": node.Name,
+			"role": "node", "permissions": "", "status": node.Status,
+		},
+		"token":        adminToken,
+		"permissions":  "",
+		"user_type":    "node",
+		"node_id":      node.ID,
+		"node_role":    node.Role,
+		"share_percent": node.SharePercent,
+	})
 }
 
 // AdminLogout ออกจากระบบ — ลบ httpOnly cookie
@@ -137,14 +184,15 @@ func (h *Handler) cookieConfig() middleware.CookieConfig {
 // =============================================================================
 
 func (h *Handler) GetDashboard(c *gin.Context) {
-	// ⚠️ Redis cache 60 วินาที — ลด DB load สำหรับ dashboard ที่เรียกบ่อย
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
+
+	// ⚠️ Redis cache 60 วินาที — เฉพาะ admin (node ไม่ cache เพราะ scope ต่างกัน)
 	ctx := c.Request.Context()
 	cacheKey := "admin:dashboard:" + time.Now().Format("2006-01-02")
 
-	if h.Redis != nil {
+	if h.Redis != nil && !scope.IsNode {
 		cached, err := h.Redis.Get(ctx, cacheKey).Result()
 		if err == nil {
-			// ส่ง cached JSON กลับตรงๆ
 			c.Data(200, "application/json", []byte(cached))
 			return
 		}
@@ -159,21 +207,35 @@ func (h *Handler) GetDashboard(c *gin.Context) {
 		OpenRounds    int64   `json:"open_rounds"`
 	}
 
-	// ⚠️ ใช้ range query แทน DATE(created_at) — ให้ MySQL ใช้ index ได้
 	todayStart := time.Now().Truncate(24 * time.Hour)
 	todayEnd := todayStart.Add(24 * time.Hour)
 
-	h.DB.Model(&model.Member{}).Count(&stats.TotalMembers)
-	h.DB.Model(&model.Member{}).Where("status = ?", "active").Count(&stats.ActiveMembers)
-	h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ?", todayStart, todayEnd).Count(&stats.TotalBets)
-	h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ?", todayStart, todayEnd).
-		Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalAmount)
-	h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ? AND status = ?", todayStart, todayEnd, "won").
-		Select("COALESCE(SUM(win_amount), 0)").Scan(&stats.TotalWin)
+	// ⭐ Members — scope ตาม node
+	memberQ := h.DB.Model(&model.Member{})
+	memberQ = scope.ScopeByNodeID(memberQ, "agent_node_id")
+	memberQ.Count(&stats.TotalMembers)
+
+	memberActiveQ := h.DB.Model(&model.Member{}).Where("status = ?", "active")
+	memberActiveQ = scope.ScopeByNodeID(memberActiveQ, "agent_node_id")
+	memberActiveQ.Count(&stats.ActiveMembers)
+
+	// ⭐ Bets — scope ตาม member_id
+	betQ := h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ?", todayStart, todayEnd)
+	betQ = scope.ScopeByMemberID(betQ, "member_id")
+	betQ.Count(&stats.TotalBets)
+
+	betAmtQ := h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ?", todayStart, todayEnd)
+	betAmtQ = scope.ScopeByMemberID(betAmtQ, "member_id")
+	betAmtQ.Select("COALESCE(SUM(amount), 0)").Scan(&stats.TotalAmount)
+
+	betWinQ := h.DB.Model(&model.Bet{}).Where("created_at >= ? AND created_at < ? AND status = ?", todayStart, todayEnd, "won")
+	betWinQ = scope.ScopeByMemberID(betWinQ, "member_id")
+	betWinQ.Select("COALESCE(SUM(win_amount), 0)").Scan(&stats.TotalWin)
+
 	h.DB.Model(&model.LotteryRound{}).Where("status = ?", "open").Count(&stats.OpenRounds)
 
-	// Cache ใน Redis 60 วินาที
-	if h.Redis != nil {
+	// Cache ใน Redis 60 วินาที (เฉพาะ admin)
+	if h.Redis != nil && !scope.IsNode {
 		jsonBytes, _ := json.Marshal(gin.H{"success": true, "data": stats})
 		h.Redis.Set(ctx, cacheKey, string(jsonBytes), 60*time.Second)
 	}
@@ -218,14 +280,41 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 	prevFrom := rangeFrom.Add(-rangeDuration)
 	prevTo := rangeFrom
 
-	// ─── Redis cache 30s (สั้นลงเพราะ filter เปลี่ยนบ่อย) ───
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
+
+	// ─── Redis cache 30s (เฉพาะ admin — node ไม่ cache เพราะ scope ต่างกัน) ───
 	ctx := c.Request.Context()
 	cacheKey := "admin:dashboardV2:" + rangeFrom.Format("20060102") + ":" + rangeTo.Format("20060102")
-	if h.Redis != nil {
+	if h.Redis != nil && !scope.IsNode {
 		if cached, err := h.Redis.Get(ctx, cacheKey).Result(); err == nil {
 			c.Data(200, "application/json", []byte(cached))
 			return
 		}
+	}
+
+	// ⭐ helper: สร้าง WHERE clause สำหรับ member scope (ใช้ใน raw SQL)
+	memberFilter := ""         // สำหรับ transactions (member_id)
+	betMemberFilter := ""      // สำหรับ bets (b.member_id)
+	memberModelFilter := ""    // สำหรับ members model (agent_node_id)
+	depositMemberFilter := ""  // สำหรับ deposit_requests (member_id)
+	if scope.IsNode {
+		mIDs := scope.MemberIDsForSQL()
+		idStr := ""
+		for i, id := range mIDs {
+			if i > 0 { idStr += "," }
+			idStr += strconv.FormatInt(id, 10)
+		}
+		memberFilter = " AND member_id IN (" + idStr + ")"
+		betMemberFilter = " AND b.member_id IN (" + idStr + ")"
+		memberModelFilter = " AND agent_node_id IN (" + func() string {
+			s := ""
+			for i, id := range scope.NodeIDs {
+				if i > 0 { s += "," }
+				s += strconv.FormatInt(id, 10)
+			}
+			return s
+		}() + ")"
+		depositMemberFilter = memberFilter
 	}
 
 	// ═══ 1. Summary: เดือนนี้ vs เดือนก่อน ═══
@@ -241,24 +330,18 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 	}
 	var summary MonthSummary
 
-	// ฝาก
-	h.DB.Table("transactions").Where("type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.DepositsThisMonth)
-	h.DB.Table("transactions").Where("type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?", prevFrom, prevTo).
-		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.DepositsLastMonth)
+	// ฝาก — ⭐ scope ด้วย memberFilter
+	h.DB.Raw("SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?"+memberFilter, rangeFrom, rangeTo).Scan(&summary.DepositsThisMonth)
+	h.DB.Raw("SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE type IN ('deposit','admin_credit') AND created_at >= ? AND created_at < ?"+memberFilter, prevFrom, prevTo).Scan(&summary.DepositsLastMonth)
 	// ถอน
-	h.DB.Table("transactions").Where("type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.WithdrawalsThisMonth)
-	h.DB.Table("transactions").Where("type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?", prevFrom, prevTo).
-		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&summary.WithdrawalsLastMonth)
+	h.DB.Raw("SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?"+memberFilter, rangeFrom, rangeTo).Scan(&summary.WithdrawalsThisMonth)
+	h.DB.Raw("SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE type IN ('withdraw','admin_debit') AND created_at >= ? AND created_at < ?"+memberFilter, prevFrom, prevTo).Scan(&summary.WithdrawalsLastMonth)
 	// กำไร = ยอดแทง - ยอดจ่าย
-	h.DB.Table("bets").Where("created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(amount),0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END),0)").Scan(&summary.ProfitThisMonth)
-	h.DB.Table("bets").Where("created_at >= ? AND created_at < ?", prevFrom, prevTo).
-		Select("COALESCE(SUM(amount),0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END),0)").Scan(&summary.ProfitLastMonth)
+	h.DB.Raw("SELECT COALESCE(SUM(amount),0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END),0) FROM bets WHERE created_at >= ? AND created_at < ?"+memberFilter, rangeFrom, rangeTo).Scan(&summary.ProfitThisMonth)
+	h.DB.Raw("SELECT COALESCE(SUM(amount),0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END),0) FROM bets WHERE created_at >= ? AND created_at < ?"+memberFilter, prevFrom, prevTo).Scan(&summary.ProfitLastMonth)
 	// สมาชิกใหม่
-	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ?", rangeFrom, rangeTo).Count(&summary.NewMembersThisMonth)
-	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ?", prevFrom, prevTo).Count(&summary.NewMembersLastMonth)
+	h.DB.Raw("SELECT COUNT(*) FROM members WHERE created_at >= ? AND created_at < ?"+memberModelFilter, rangeFrom, rangeTo).Scan(&summary.NewMembersThisMonth)
+	h.DB.Raw("SELECT COUNT(*) FROM members WHERE created_at >= ? AND created_at < ?"+memberModelFilter, prevFrom, prevTo).Scan(&summary.NewMembersLastMonth)
 
 	// ═══ 2. Chart: ฝาก/ถอน 30 วันย้อนหลัง ═══
 	type ChartPoint struct {
@@ -272,7 +355,7 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		SELECT DATE(created_at) as date,
 			COALESCE(SUM(CASE WHEN type IN ('deposit','admin_credit') THEN ABS(amount) ELSE 0 END),0) as deposits,
 			COALESCE(SUM(CASE WHEN type IN ('withdraw','admin_debit') THEN ABS(amount) ELSE 0 END),0) as withdrawals
-		FROM transactions WHERE created_at >= ?
+		FROM transactions WHERE created_at >= ?`+memberFilter+`
 		GROUP BY DATE(created_at) ORDER BY date
 	`, thirtyDaysAgo).Scan(&chartData)
 
@@ -290,7 +373,7 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 			COALESCE(SUM(CASE WHEN b.status='won' THEN b.win_amount ELSE 0 END),0) as total_win,
 			SUM(b.amount) - COALESCE(SUM(CASE WHEN b.status='won' THEN b.win_amount ELSE 0 END),0) as profit
 		FROM bets b LEFT JOIN members m ON m.id = b.member_id
-		WHERE b.created_at >= ? AND b.created_at < ?
+		WHERE b.created_at >= ? AND b.created_at < ?`+betMemberFilter+`
 		GROUP BY b.member_id, m.username ORDER BY total_bet DESC LIMIT 10
 	`, rangeFrom, rangeTo).Scan(&topBettors)
 
@@ -307,7 +390,7 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 			COALESCE(SUM(CASE WHEN t.type IN ('deposit','admin_credit') THEN ABS(t.amount) ELSE 0 END),0) as total_deposit,
 			COALESCE(SUM(CASE WHEN t.type IN ('withdraw','admin_debit') THEN ABS(t.amount) ELSE 0 END),0) as total_withdraw
 		FROM transactions t LEFT JOIN members m ON m.id = t.member_id
-		WHERE t.created_at >= ? AND t.created_at < ?
+		WHERE t.created_at >= ? AND t.created_at < ?`+memberFilter+`
 		GROUP BY t.member_id, m.username ORDER BY total_deposit DESC LIMIT 10
 	`, rangeFrom, rangeTo).Scan(&topDepositors)
 
@@ -324,9 +407,11 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 	var recentDeposits, recentWithdrawals []RecentTx
 	h.DB.Raw(`SELECT d.id, d.member_id, m.username, d.amount, d.status, '' as bank_code, d.created_at
 		FROM deposit_requests d LEFT JOIN members m ON m.id = d.member_id
+		WHERE 1=1`+depositMemberFilter+`
 		ORDER BY d.created_at DESC LIMIT 5`).Scan(&recentDeposits)
 	h.DB.Raw(`SELECT w.id, w.member_id, m.username, w.amount, w.status, w.bank_code, w.created_at
 		FROM withdraw_requests w LEFT JOIN members m ON m.id = w.member_id
+		WHERE 1=1`+depositMemberFilter+`
 		ORDER BY w.created_at DESC LIMIT 5`).Scan(&recentWithdrawals)
 
 	// ═══ 6. ติดตามสมาชิกรายวัน ═══
@@ -336,9 +421,9 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		DepositedToday  int64 `json:"deposited_today"`
 	}
 	var tracking MemberTracking
-	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ? AND referred_by IS NULL", todayStart, todayEnd).Count(&tracking.DirectSignups)
-	h.DB.Model(&model.Member{}).Where("created_at >= ? AND created_at < ? AND referred_by IS NOT NULL", todayStart, todayEnd).Count(&tracking.ReferralSignups)
-	h.DB.Raw("SELECT COUNT(DISTINCT member_id) FROM deposit_requests WHERE status='approved' AND created_at >= ? AND created_at < ?", todayStart, todayEnd).Scan(&tracking.DepositedToday)
+	h.DB.Raw("SELECT COUNT(*) FROM members WHERE created_at >= ? AND created_at < ? AND referred_by IS NULL"+memberModelFilter, todayStart, todayEnd).Scan(&tracking.DirectSignups)
+	h.DB.Raw("SELECT COUNT(*) FROM members WHERE created_at >= ? AND created_at < ? AND referred_by IS NOT NULL"+memberModelFilter, todayStart, todayEnd).Scan(&tracking.ReferralSignups)
+	h.DB.Raw("SELECT COUNT(DISTINCT member_id) FROM deposit_requests WHERE status='approved' AND created_at >= ? AND created_at < ?"+depositMemberFilter, todayStart, todayEnd).Scan(&tracking.DepositedToday)
 
 	// ═══ 7. Credit Stats ═══
 	type CreditStats struct {
@@ -350,17 +435,12 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		CancelledWithdraw float64 `json:"cancelled_withdrawals"`
 	}
 	var credits CreditStats
-	h.DB.Table("transactions").Where("type='admin_credit' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&credits.CreditAdded)
-	h.DB.Table("transactions").Where("type='admin_debit' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(ABS(amount)),0)").Scan(&credits.CreditDeducted)
-	h.DB.Table("deposit_requests").Where("status='approved' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).Count(&credits.DepositCount)
-	h.DB.Table("referral_commissions").Where("created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(amount),0)").Scan(&credits.CommissionTotal)
-	h.DB.Table("deposit_requests").Where("status='cancelled' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(amount),0)").Scan(&credits.CancelledDeposit)
-	h.DB.Table("withdraw_requests").Where("status='rejected' AND created_at >= ? AND created_at < ?", rangeFrom, rangeTo).
-		Select("COALESCE(SUM(amount),0)").Scan(&credits.CancelledWithdraw)
+	h.DB.Raw("SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE type='admin_credit' AND created_at >= ? AND created_at < ?"+memberFilter, rangeFrom, rangeTo).Scan(&credits.CreditAdded)
+	h.DB.Raw("SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE type='admin_debit' AND created_at >= ? AND created_at < ?"+memberFilter, rangeFrom, rangeTo).Scan(&credits.CreditDeducted)
+	h.DB.Raw("SELECT COUNT(*) FROM deposit_requests WHERE status='approved' AND created_at >= ? AND created_at < ?"+depositMemberFilter, rangeFrom, rangeTo).Scan(&credits.DepositCount)
+	h.DB.Raw("SELECT COALESCE(SUM(amount),0) FROM referral_commissions WHERE created_at >= ? AND created_at < ?"+memberFilter, rangeFrom, rangeTo).Scan(&credits.CommissionTotal)
+	h.DB.Raw("SELECT COALESCE(SUM(amount),0) FROM deposit_requests WHERE status='cancelled' AND created_at >= ? AND created_at < ?"+depositMemberFilter, rangeFrom, rangeTo).Scan(&credits.CancelledDeposit)
+	h.DB.Raw("SELECT COALESCE(SUM(amount),0) FROM withdraw_requests WHERE status='rejected' AND created_at >= ? AND created_at < ?"+depositMemberFilter, rangeFrom, rangeTo).Scan(&credits.CancelledWithdraw)
 
 	// ═══ 8. บัญชีธนาคาร ═══
 	type BankAccount struct {
@@ -387,8 +467,8 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		"bank_accounts":        bankAccounts,
 	}
 
-	// Cache 60s
-	if h.Redis != nil {
+	// Cache 60s (เฉพาะ admin)
+	if h.Redis != nil && !scope.IsNode {
 		jsonBytes, _ := json.Marshal(gin.H{"success": true, "data": resp})
 		h.Redis.Set(ctx, cacheKey, string(jsonBytes), 60*time.Second)
 	}
@@ -402,9 +482,11 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 
 func (h *Handler) ListMembers(c *gin.Context) {
 	page, perPage := pageParams(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
 	var members []model.Member
 	var total int64
 	query := h.DB.Model(&model.Member{})
+	query = scope.ScopeByNodeID(query, "agent_node_id") // ⭐ node เห็นเฉพาะ members ในสาย
 	if s := c.Query("status"); s != "" { query = query.Where("status = ?", s) }
 	if q := c.Query("q"); q != "" { query = query.Where("username LIKE ? OR phone LIKE ?", "%"+q+"%", "%"+q+"%") }
 	query.Count(&total)
@@ -414,8 +496,11 @@ func (h *Handler) ListMembers(c *gin.Context) {
 
 func (h *Handler) GetMember(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
 	var member model.Member
 	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
+	// ⭐ เช็คว่า member อยู่ในสายของ node user
+	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์เข้าถึงสมาชิกนี้"); return }
 
 	// ── Aggregated data: ยอดแทง/ชนะ/ฝาก/ถอน + referrer username ──
 	type AggBet struct {
@@ -478,8 +563,10 @@ func (h *Handler) GetMember(c *gin.Context) {
 
 func (h *Handler) UpdateMember(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var member model.Member
 	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
+	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 	var req struct {
 		Phone    string `json:"phone"`
 		Email    string `json:"email"`
@@ -509,6 +596,7 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 // amount เป็นบวก = เติม, ลบ = หัก
 func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var req struct {
 		Amount float64 `json:"amount" binding:"required"`
 		Note   string  `json:"note"`
@@ -517,6 +605,7 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 
 	var member model.Member
 	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
+	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 
 	// เช็คว่าหักแล้วไม่ติดลบ
 	if req.Amount < 0 && member.Balance+req.Amount < 0 {
@@ -542,6 +631,8 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 
 func (h *Handler) UpdateMemberStatus(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 	var req struct { Status string `json:"status" binding:"required"` }
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 	h.DB.Model(&model.Member{}).Where("id = ?", id).Update("status", req.Status)
@@ -553,9 +644,45 @@ func (h *Handler) UpdateMemberStatus(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) ListLotteries(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+
+	// ⭐ ทุกเว็บเห็นประเภทหวยเหมือนกัน แต่เพิ่ม field "enabled" ตาม config ของเว็บ
+	// เวลาเปิด/ปิดส่งผลเฉพาะเว็บตัวเอง (ลูกค้าของเว็บนี้แทงได้/ไม่ได้)
+	type lotteryWithEnabled struct {
+		model.LotteryType
+		Enabled *bool `json:"enabled" gorm:"-"` // nil = ยังไม่ตั้ง (default = เปิด)
+	}
+
 	var types []model.LotteryType
 	h.DB.Order("id ASC").Find(&types)
-	ok(c, types)
+
+	// ดึง config เปิด/ปิด ของเว็บนี้
+	enabledMap := map[int64]bool{}
+	if scope.IsNode {
+		type configRow struct {
+			LotteryTypeID int64 `gorm:"column:lottery_type_id"`
+			Enabled       bool  `gorm:"column:enabled"`
+		}
+		var configs []configRow
+		h.DB.Raw("SELECT lottery_type_id, enabled FROM agent_lottery_config WHERE agent_node_id = ?", scope.NodeID).Scan(&configs)
+		for _, c := range configs {
+			enabledMap[c.LotteryTypeID] = c.Enabled
+		}
+	}
+
+	// Build response — เพิ่ม enabled flag
+	result := make([]lotteryWithEnabled, len(types))
+	for i, lt := range types {
+		result[i].LotteryType = lt
+		if scope.IsNode {
+			if enabled, ok := enabledMap[lt.ID]; ok {
+				result[i].Enabled = &enabled
+			}
+			// nil = ยังไม่ตั้ง config → frontend แสดงเป็น default (ปิด)
+		}
+	}
+
+	ok(c, result)
 }
 
 func (h *Handler) CreateLottery(c *gin.Context) {
@@ -631,6 +758,8 @@ func (h *Handler) UpdateLotteryImage(c *gin.Context) {
 
 func (h *Handler) ListRounds(c *gin.Context) {
 	page, perPage := pageParams(c)
+	// ⭐ ทุกเว็บเห็นรอบเดียวกัน (ผลหวยเหมือนกัน เช่น หวยรัฐออก 847 ทุกเว็บก็ 847)
+	// แต่สถานะเปิด/ปิดรับแทงแยกตามเว็บ (ผ่าน agent_round_config)
 	var rounds []model.LotteryRound
 	var total int64
 	query := h.DB.Model(&model.LotteryRound{}).Preload("LotteryType")
@@ -1021,6 +1150,11 @@ func (h *Handler) SubmitResult(c *gin.Context) {
 	// Run ใน goroutine แยก → ไม่ block response
 	go job.CalculateCommissions(h.DB, roundID, 1 /* agentID = 1 สำหรับ standalone */)
 
+	// ─── Step 9: คำนวณกำไรสายงาน (Downline Profit Sharing) ────
+	// คำนวณส่วนแบ่งกำไร/ขาดทุนให้ทุก node ในสายงาน
+	// ดู: job/commission_job.go → CalculateDownlineProfits()
+	go job.CalculateDownlineProfits(h.DB, roundID, 1)
+
 	// ─── Response ──────────────────────────────────────────────
 	ok(c, gin.H{
 		"round_id":      roundID,
@@ -1053,9 +1187,14 @@ func (h *Handler) ListResults(c *gin.Context) {
 
 func (h *Handler) ListBans(c *gin.Context) {
 	page, perPage := pageParams(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var bans []model.NumberBan
 	var total int64
 	query := h.DB.Model(&model.NumberBan{}).Where("status = ?", "active")
+	// ⭐ node เห็นเฉพาะเลขอั้นของตัวเอง (ไม่เห็นของคนอื่น)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
 	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
 	query.Count(&total)
 	query.Order("created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&bans)
@@ -1089,9 +1228,18 @@ func (h *Handler) CreateBan(c *gin.Context) {
 		fail(c, 400, "bet_type_id ต้องเป็นตัวเลขหรือ code"); return
 	}
 
+	// ⭐ node user: ตั้ง agent_node_id ให้เลขอั้นเป็นของ node ตัวเอง
+	scope := mw.GetNodeScope(c, h.DB)
+	var banNodeID *int64
+	if scope.IsNode {
+		nid := scope.NodeID
+		banNodeID = &nid
+	}
+
 	ban := model.NumberBan{
 		LotteryTypeID: req.LotteryTypeID,
 		BetTypeID:     betTypeID,
+		AgentNodeID:   banNodeID, // ⭐ NULL=ทั้งระบบ (admin), มีค่า=เฉพาะ node
 		Number:        req.Number,
 		BanType:       req.BanType,
 		ReducedRate:   req.ReducedRate,
@@ -1106,6 +1254,15 @@ func (h *Handler) CreateBan(c *gin.Context) {
 
 func (h *Handler) DeleteBan(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	// ⭐ node user: ลบได้เฉพาะเลขอั้นของ node ตัวเอง (ห้ามลบของ admin/ระบบ)
+	if scope.IsNode {
+		var ban model.NumberBan
+		h.DB.First(&ban, id)
+		if ban.AgentNodeID == nil || !func() bool { for _, nid := range scope.NodeIDs { if nid == *ban.AgentNodeID { return true } }; return false }() {
+			fail(c, 403, "ไม่สามารถลบเลขอั้นของระบบได้"); return
+		}
+	}
 	h.DB.Model(&model.NumberBan{}).Where("id = ?", id).Update("status", "inactive")
 	ok(c, gin.H{"id": id, "status": "inactive"})
 }
@@ -1115,14 +1272,26 @@ func (h *Handler) DeleteBan(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) ListRates(c *gin.Context) {
+	// ⭐ ดึง scope — node เห็นเฉพาะ pay rates ของตัวเอง, admin เห็นของระบบกลาง
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var rates []model.PayRate
 	query := h.DB.Preload("BetType").Preload("LotteryType").Where("status = ?", "active")
+	// ⭐ scope: node เห็นเฉพาะ rates ของตัวเอง, admin เห็นของระบบ (agent_node_id IS NULL)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id IS NULL")
+	}
 	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
 	query.Find(&rates)
 	ok(c, rates)
 }
 
 func (h *Handler) UpdateRate(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node แก้ rates ของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct {
 		Rate            *float64 `json:"rate"`
@@ -1132,7 +1301,12 @@ func (h *Handler) UpdateRate(c *gin.Context) {
 	updates := map[string]interface{}{}
 	if req.Rate != nil { updates["rate"] = *req.Rate }
 	if req.MaxBetPerNumber != nil { updates["max_bet_per_number"] = *req.MaxBetPerNumber }
-	h.DB.Model(&model.PayRate{}).Where("id = ?", id).Updates(updates)
+	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะ rates ของตัวเอง
+	query := h.DB.Model(&model.PayRate{}).Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	query.Updates(updates)
 	ok(c, gin.H{"id": id, "updated": updates})
 }
 
@@ -1140,23 +1314,355 @@ func (h *Handler) UpdateRate(c *gin.Context) {
 // Bets + Transactions (read-only)
 // =============================================================================
 
+// ListAllBets แสดงรายการเดิมพันแบบ bill-level (group by batch_id)
+// GET /api/v1/bets
+//
+// ⭐ แต่ละ row = 1 บิล (batch_id) → แสดงสรุป: จำนวนเลข, ยอดแทงรวม, ยอดชนะรวม, กำไร/ขาดทุน
+// สถานะบิล: pending (มีเลขรอผล), won (กำไร), lost (ขาดทุน), cancelled (ยกเลิกทั้งหมด)
 func (h *Handler) ListAllBets(c *gin.Context) {
 	page, perPage := pageParams(c)
-	var bets []model.Bet
+
+	type BillRow struct {
+		BatchID        string  `json:"batch_id"`
+		MemberID       int64   `json:"member_id"`
+		Username       string  `json:"username"`
+		LotteryRoundID int64   `json:"lottery_round_id"`
+		BetCount       int     `json:"bet_count"`
+		Numbers        string  `json:"numbers"`
+		TotalAmount    float64 `json:"total_amount"`
+		TotalWin       float64 `json:"total_win"`
+		PendingCount   int     `json:"pending_count"`
+		WonCount       int     `json:"won_count"`
+		LostCount      int     `json:"lost_count"`
+		CancelledCount int     `json:"cancelled_count"`
+		CreatedAt      string  `json:"created_at"`
+	}
+
+	// ── WHERE conditions ─────────────────────────────────────
+	where := "1=1"
+	args := []interface{}{}
+
+	if s := c.Query("status"); s != "" {
+		// filter bill-level status
+		switch s {
+		case "pending":
+			where += " AND pending_count > 0"
+		case "won":
+			where += " AND pending_count = 0 AND total_win > total_amount AND cancelled_count < bet_count"
+		case "lost":
+			where += " AND pending_count = 0 AND total_win <= total_amount AND cancelled_count < bet_count"
+		case "cancelled":
+			where += " AND cancelled_count = bet_count"
+		}
+	}
+
+	// ⭐ scope ตามสายงาน — node เห็นเฉพาะ bets ของ members ในสาย
+	scope := mw.GetNodeScope(c, h.DB)
+
+	// sub-conditions on bets table
+	betWhere := "1=1"
+	betArgs := []interface{}{}
+
+	// ⭐ node user: filter เฉพาะ members ในสาย
+	if scope.IsNode {
+		mIDs := scope.MemberIDsForSQL()
+		betWhere += " AND b.member_id IN (?)"
+		betArgs = append(betArgs, mIDs)
+	}
+
+	if q := c.Query("q"); q != "" {
+		like := "%" + q + "%"
+		betWhere += " AND (b.number LIKE ? OR m.username LIKE ?)"
+		betArgs = append(betArgs, like, like)
+	}
+	if df := c.Query("date_from"); df != "" {
+		betWhere += " AND b.created_at >= ?"
+		betArgs = append(betArgs, df+" 00:00:00")
+	}
+	if dt := c.Query("date_to"); dt != "" {
+		betWhere += " AND b.created_at <= ?"
+		betArgs = append(betArgs, dt+" 23:59:59")
+	}
+	if lt := c.Query("lottery_type_id"); lt != "" {
+		betWhere += " AND b.lottery_round_id IN (SELECT id FROM lottery_rounds WHERE lottery_type_id = ?)"
+		betArgs = append(betArgs, lt)
+	}
+
+	// ── Main query: group by batch_id ────────────────────────
+	baseSQL := `
+		SELECT
+			b.batch_id,
+			b.member_id,
+			m.username,
+			b.lottery_round_id,
+			COUNT(*) as bet_count,
+			GROUP_CONCAT(b.number ORDER BY b.id SEPARATOR ', ') as numbers,
+			SUM(b.amount) as total_amount,
+			SUM(b.win_amount) as total_win,
+			SUM(CASE WHEN b.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+			SUM(CASE WHEN b.status = 'won' THEN 1 ELSE 0 END) as won_count,
+			SUM(CASE WHEN b.status = 'lost' THEN 1 ELSE 0 END) as lost_count,
+			SUM(CASE WHEN b.status = 'cancelled' THEN 1 ELSE 0 END) as cancelled_count,
+			MIN(b.created_at) as created_at
+		FROM bets b
+		LEFT JOIN members m ON m.id = b.member_id
+		WHERE ` + betWhere + `
+		GROUP BY b.batch_id, b.member_id, m.username, b.lottery_round_id
+	`
+
+	// Count total bills (wrap in subquery)
 	var total int64
-	query := h.DB.Model(&model.Bet{}).Preload("Member").Preload("BetType").Preload("LotteryRound")
-	if s := c.Query("status"); s != "" { query = query.Where("status = ?", s) }
-	if r := c.Query("round_id"); r != "" { query = query.Where("lottery_round_id = ?", r) }
-	query.Count(&total)
-	query.Order("created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&bets)
-	paginated(c, bets, total, page, perPage)
+	countSQL := "SELECT COUNT(*) FROM (" + baseSQL + " HAVING " + where + ") AS bills"
+	allArgs := append(betArgs, args...)
+	h.DB.Raw(countSQL, allArgs...).Scan(&total)
+
+	// Paginated results
+	dataSQL := baseSQL + " HAVING " + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	allArgs = append(allArgs, perPage, (page-1)*perPage)
+
+	var rows []BillRow
+	h.DB.Raw(dataSQL, allArgs...).Scan(&rows)
+
+	paginated(c, rows, total, page, perPage)
+}
+
+// GetBillDetail ดึงทุก bets ในบิลเดียวกัน (batch_id)
+// GET /api/v1/bets/bill/:batchId
+func (h *Handler) GetBillDetail(c *gin.Context) {
+	batchID := c.Param("batchId")
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	if batchID == "" {
+		fail(c, 400, "invalid batch_id"); return
+	}
+
+	query := h.DB.Model(&model.Bet{}).
+		Preload("Member").Preload("BetType").Preload("LotteryRound").
+		Where("batch_id = ?", batchID)
+	query = scope.ScopeByMemberID(query, "member_id") // ⭐
+	var bets []model.Bet
+	query.Order("id ASC").Find(&bets)
+
+	if len(bets) == 0 {
+		fail(c, 404, "ไม่พบบิล"); return
+	}
+
+	// สรุปยอดรวม
+	var totalAmount, totalWin float64
+	for _, b := range bets {
+		totalAmount += b.Amount
+		totalWin += b.WinAmount
+	}
+
+	ok(c, gin.H{
+		"batch_id":     batchID,
+		"bets":         bets,
+		"count":        len(bets),
+		"total_amount": totalAmount,
+		"total_win":    totalWin,
+	})
+}
+
+// CancelBill ยกเลิกทั้งบิล (ทุก bet ใน batch_id เดียวกัน)
+// PUT /api/v1/bets/bill/:batchId/cancel
+// Body: { "refund": true/false, "reason": "เหตุผล" }
+func (h *Handler) CancelBill(c *gin.Context) {
+	batchID := c.Param("batchId")
+	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+
+	var req struct {
+		Refund bool   `json:"refund"`
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
+
+	// ดึงทุก bet ในบิลที่ยังไม่ถูกยกเลิก
+	var bets []model.Bet
+	query := h.DB.Where("batch_id = ? AND status != 'cancelled'", batchID)
+	query = scope.ScopeByMemberID(query, "member_id") // ⭐
+	query.Find(&bets)
+	if len(bets) == 0 {
+		fail(c, 400, "ไม่มีรายการที่สามารถยกเลิกได้"); return
+	}
+
+	tx := h.DB.Begin()
+	now := time.Now()
+
+	var totalRefund float64
+	var totalDebit float64
+
+	for _, bet := range bets {
+		// อัพเดทสถานะ
+		tx.Model(&model.Bet{}).Where("id = ?", bet.ID).Updates(map[string]interface{}{
+			"status":        "cancelled",
+			"cancelled_at":  now,
+			"cancelled_by":  adminID,
+			"cancel_reason": req.Reason,
+		})
+
+		if req.Refund {
+			switch bet.Status {
+			case "pending", "lost":
+				totalRefund += bet.Amount
+			case "won":
+				totalDebit += bet.WinAmount
+				totalRefund += bet.Amount
+			}
+		}
+	}
+
+	memberID := bets[0].MemberID
+
+	if req.Refund {
+		// หัก win_amount (ถ้ามี bet ที่ชนะ)
+		if totalDebit > 0 {
+			debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", totalDebit, memberID, totalDebit)
+			if debitResult.RowsAffected == 0 {
+				tx.Rollback()
+				fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักรางวัลคืน"); return
+			}
+			var bal float64
+			tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&bal)
+			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+				VALUES (1, ?, 'admin_debit', ?, ?, ?, 'bill_void_debit', ?, ?)`,
+				memberID, -totalDebit, bal+totalDebit, bal, "หักรางวัลคืน (void bill "+batchID[:8]+"): "+req.Reason, now)
+		}
+
+		// คืนเงินเดิมพัน
+		if totalRefund > 0 {
+			tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", totalRefund, memberID)
+			var bal float64
+			tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&bal)
+			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+				VALUES (1, ?, 'refund', ?, ?, ?, 'bill_cancel', ?, ?)`,
+				memberID, totalRefund, bal-totalRefund, bal, "คืนเงินบิล "+batchID[:8]+": "+req.Reason, now)
+		}
+	} else {
+		var balance float64
+		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', 0, ?, ?, 'bill_cancel_no_refund', ?, ?)`,
+			memberID, balance, balance, "ยกเลิกบิล "+batchID[:8]+" (ไม่คืนเครดิต): "+req.Reason, now)
+	}
+
+	tx.Commit()
+	ok(c, gin.H{"batch_id": batchID, "cancelled_count": len(bets), "refund": req.Refund, "total_refund": totalRefund})
+}
+
+// CancelBet ยกเลิก/void รายการเดิมพันเดี่ยว (ไม่ได้ใช้จาก frontend แล้ว แต่เก็บไว้เป็น API)
+// PUT /api/v1/bets/:id/cancel
+// Body: { "refund": true/false, "reason": "เหตุผล" }
+//
+// ⭐ Logic:
+// - pending: refund = คืน bet.amount
+// - won: void = หัก win_amount ที่จ่ายไปแล้ว (ถ้า refund=true) หรือแค่ mark cancelled
+// - lost: void = คืน bet.amount (ถ้า refund=true)
+// - cancelled: ไม่ทำซ้ำ
+func (h *Handler) CancelBet(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+
+	var req struct {
+		Refund bool   `json:"refund"`
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error()); return
+	}
+
+	// ดึงข้อมูล bet
+	var bet model.Bet
+	if err := h.DB.First(&bet, id).Error; err != nil {
+		fail(c, 404, "ไม่พบรายการเดิมพัน"); return
+	}
+	if !scope.HasMember(bet.MemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐ scope
+	if bet.Status == "cancelled" {
+		fail(c, 400, "รายการนี้ถูกยกเลิกไปแล้ว"); return
+	}
+
+	tx := h.DB.Begin()
+	now := time.Now()
+
+	// อัพเดทสถานะ bet → cancelled
+	tx.Model(&model.Bet{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":        "cancelled",
+		"cancelled_at":  now,
+		"cancelled_by":  adminID,
+		"cancel_reason": req.Reason,
+	})
+
+	if req.Refund {
+		// คำนวณจำนวนเงินที่ต้องจัดการ
+		var refundAmount float64
+		var debitAmount float64
+
+		switch bet.Status {
+		case "pending":
+			// คืน bet amount
+			refundAmount = bet.Amount
+		case "won":
+			// หัก win_amount ที่จ่ายไป + คืน bet amount
+			debitAmount = bet.WinAmount
+			refundAmount = bet.Amount
+		case "lost":
+			// คืน bet amount
+			refundAmount = bet.Amount
+		}
+
+		// หัก win_amount (ถ้า won)
+		if debitAmount > 0 {
+			debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", debitAmount, bet.MemberID, debitAmount)
+			if debitResult.RowsAffected == 0 {
+				tx.Rollback()
+				fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืนรางวัล"); return
+			}
+
+			var balAfterDebit float64
+			tx.Table("members").Select("balance").Where("id = ?", bet.MemberID).Row().Scan(&balAfterDebit)
+
+			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+				VALUES (1, ?, 'admin_debit', ?, ?, ?, ?, 'bet_void_debit', ?, ?)`,
+				bet.MemberID, -debitAmount, balAfterDebit+debitAmount, balAfterDebit, id,
+				"หักรางวัลคืน (void bet #"+strconv.FormatInt(id, 10)+")", now)
+		}
+
+		// คืนเงินเดิมพัน
+		if refundAmount > 0 {
+			tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", refundAmount, bet.MemberID)
+
+			var balAfter float64
+			tx.Table("members").Select("balance").Where("id = ?", bet.MemberID).Row().Scan(&balAfter)
+
+			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+				VALUES (1, ?, 'refund', ?, ?, ?, ?, 'bet_cancel', ?, ?)`,
+				bet.MemberID, refundAmount, balAfter-refundAmount, balAfter, id,
+				"คืนเงินเดิมพัน #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
+		}
+	} else {
+		// ไม่คืนเครดิต — บันทึก audit trail
+		var balance float64
+		tx.Table("members").Select("balance").Where("id = ?", bet.MemberID).Row().Scan(&balance)
+
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', 0, ?, ?, ?, 'bet_cancel_no_refund', ?, ?)`,
+			bet.MemberID, balance, balance, id,
+			"ยกเลิกเดิมพัน #"+strconv.FormatInt(id, 10)+" (ไม่คืนเครดิต): "+req.Reason, now)
+	}
+
+	tx.Commit()
+	ok(c, gin.H{"id": id, "status": "cancelled", "refund": req.Refund, "reason": req.Reason, "previous_status": bet.Status})
 }
 
 func (h *Handler) ListAllTransactions(c *gin.Context) {
 	page, perPage := pageParams(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
 	var txns []model.Transaction
 	var total int64
 	query := h.DB.Model(&model.Transaction{})
+	query = scope.ScopeByMemberID(query, "member_id") // ⭐ node เห็นเฉพาะ transactions ของ members ในสาย
 	if t := c.Query("type"); t != "" { query = query.Where("type = ?", t) }
 	if m := c.Query("member_id"); m != "" { query = query.Where("member_id = ?", m) }
 	query.Count(&total)
@@ -1169,6 +1675,7 @@ func (h *Handler) ListAllTransactions(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) GetSummaryReport(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var result struct {
 		TotalBets    int64   `json:"total_bets"`
 		TotalAmount  float64 `json:"total_amount"`
@@ -1178,18 +1685,24 @@ func (h *Handler) GetSummaryReport(c *gin.Context) {
 	dateFrom := c.DefaultQuery("from", time.Now().AddDate(0, 0, -7).Format("2006-01-02"))
 	dateTo := c.DefaultQuery("to", time.Now().Format("2006-01-02"))
 
-	h.DB.Model(&model.Bet{}).Where("DATE(created_at) BETWEEN ? AND ?", dateFrom, dateTo).Count(&result.TotalBets)
-	h.DB.Model(&model.Bet{}).Where("DATE(created_at) BETWEEN ? AND ?", dateFrom, dateTo).
-		Select("COALESCE(SUM(amount), 0)").Scan(&result.TotalAmount)
-	h.DB.Model(&model.Bet{}).Where("DATE(created_at) BETWEEN ? AND ? AND status = ?", dateFrom, dateTo, "won").
-		Select("COALESCE(SUM(win_amount), 0)").Scan(&result.TotalWin)
-	result.Profit = result.TotalAmount - result.TotalWin
+	q1 := h.DB.Model(&model.Bet{}).Where("DATE(created_at) BETWEEN ? AND ?", dateFrom, dateTo)
+	q1 = scope.ScopeByMemberID(q1, "member_id") // ⭐
+	q1.Count(&result.TotalBets)
 
+	q2 := h.DB.Model(&model.Bet{}).Where("DATE(created_at) BETWEEN ? AND ?", dateFrom, dateTo)
+	q2 = scope.ScopeByMemberID(q2, "member_id") // ⭐
+	q2.Select("COALESCE(SUM(amount), 0)").Scan(&result.TotalAmount)
+
+	q3 := h.DB.Model(&model.Bet{}).Where("DATE(created_at) BETWEEN ? AND ? AND status = ?", dateFrom, dateTo, "won")
+	q3 = scope.ScopeByMemberID(q3, "member_id") // ⭐
+	q3.Select("COALESCE(SUM(win_amount), 0)").Scan(&result.TotalWin)
+
+	result.Profit = result.TotalAmount - result.TotalWin
 	ok(c, result)
 }
 
 func (h *Handler) GetProfitReport(c *gin.Context) {
-	// รายงานกำไร/ขาดทุนรายวัน
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	dateFrom := c.DefaultQuery("from", time.Now().AddDate(0, 0, -30).Format("2006-01-02"))
 	dateTo := c.DefaultQuery("to", time.Now().Format("2006-01-02"))
 
@@ -1201,9 +1714,11 @@ func (h *Handler) GetProfitReport(c *gin.Context) {
 		Profit      float64 `json:"profit"`
 	}
 	var daily []DailyProfit
-	h.DB.Model(&model.Bet{}).
+	q := h.DB.Model(&model.Bet{}).
 		Select("DATE(created_at) as date, COUNT(*) as total_bets, COALESCE(SUM(amount), 0) as total_amount, COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END), 0) as total_win, COALESCE(SUM(amount), 0) - COALESCE(SUM(CASE WHEN status='won' THEN win_amount ELSE 0 END), 0) as profit").
-		Where("DATE(created_at) BETWEEN ? AND ?", dateFrom, dateTo).
+		Where("DATE(created_at) BETWEEN ? AND ?", dateFrom, dateTo)
+	q = scope.ScopeByMemberID(q, "member_id") // ⭐
+	q.
 		Group("DATE(created_at)").
 		Order("date ASC").
 		Scan(&daily)
@@ -1223,6 +1738,12 @@ func (h *Handler) GetProfitReport(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) GetAgentTheme(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้สำหรับ per-node theme ในอนาคต
+	// ตอนนี้ standalone มี 1 agent → theme เป็น global
+	// node ยังอ่าน theme ของ agent ได้ (ใช้แสดงหน้าเว็บ)
+	scope := mw.GetNodeScope(c, h.DB)
+	_ = scope // ⭐ reserved สำหรับ per-node theme override ในอนาคต
+
 	type ThemeRow struct {
 		ThemePrimaryColor   string `json:"theme_primary_color"`
 		ThemeSecondaryColor string `json:"theme_secondary_color"`
@@ -1243,6 +1764,13 @@ func (h *Handler) GetAgentTheme(c *gin.Context) {
 }
 
 func (h *Handler) UpdateAgentTheme(c *gin.Context) {
+	// ⭐ ดึง scope — node ไม่ควรแก้ theme ของระบบกลาง (เฉพาะ admin)
+	// ในอนาคตจะรองรับ per-node theme override
+	scope := mw.GetNodeScope(c, h.DB)
+	if scope.IsNode {
+		fail(c, 403, "node ไม่สามารถแก้ไข theme ของระบบได้"); return
+	}
+
 	var req struct {
 		PrimaryColor   *string `json:"theme_primary_color"`
 		SecondaryColor *string `json:"theme_secondary_color"`
@@ -1282,20 +1810,44 @@ func (h *Handler) UpdateAgentTheme(c *gin.Context) {
 }
 
 func (h *Handler) GetSettings(c *gin.Context) {
+	// ⭐ ดึง scope — node เห็นเฉพาะ settings ที่เกี่ยวข้องกับตัวเอง
+	// settings เป็น key-value table → node ใช้ key prefix "node_{nodeID}_" สำหรับ override
+	// admin เห็นทุก settings
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var settings []model.Setting
-	h.DB.Find(&settings)
+	if scope.IsNode {
+		// ⭐ node เห็น: settings ทั่วไป + settings เฉพาะ node ของตัวเอง
+		prefix := "node_" + strconv.FormatInt(scope.NodeID, 10) + "_"
+		h.DB.Where("`key` NOT LIKE 'node_%' OR `key` LIKE ?", prefix+"%").Find(&settings)
+	} else {
+		h.DB.Find(&settings)
+	}
 	ok(c, settings)
 }
 
 func (h *Handler) UpdateSettings(c *gin.Context) {
+	// ⭐ ดึง scope — node แก้ได้เฉพาะ settings ของตัวเอง (prefix "node_{nodeID}_")
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req map[string]string
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 	for key, value := range req {
+		// ⭐ ถ้าเป็น node → บังคับ prefix key เพื่อไม่ให้แก้ settings ระบบ
+		actualKey := key
+		if scope.IsNode {
+			prefix := "node_" + strconv.FormatInt(scope.NodeID, 10) + "_"
+			// ถ้า key ไม่ได้ขึ้นต้นด้วย prefix ของตัวเอง → เพิ่ม prefix
+			if !strings.HasPrefix(key, prefix) {
+				actualKey = prefix + key
+			}
+		}
+
 		// ⭐ Upsert: ถ้ามี key → update, ถ้ายังไม่มี → insert
 		var existing model.Setting
-		if err := h.DB.Where("`key` = ?", key).First(&existing).Error; err != nil {
+		if err := h.DB.Where("`key` = ?", actualKey).First(&existing).Error; err != nil {
 			// ไม่มี → สร้างใหม่
-			h.DB.Create(&model.Setting{Key: key, Value: value})
+			h.DB.Create(&model.Setting{Key: actualKey, Value: value})
 		} else {
 			// มีอยู่แล้ว → update value
 			h.DB.Model(&existing).Update("value", value)
@@ -1313,14 +1865,27 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) GetAffiliateSettings(c *gin.Context) {
+	// ⭐ ดึง scope — node เห็นเฉพาะ affiliate settings ของตัวเอง + ของระบบ (fallback)
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var settings []model.AffiliateSettings
-	h.DB.Preload("LotteryType").Where("status = ?", "active").Order("lottery_type_id ASC").Find(&settings)
+	query := h.DB.Preload("LotteryType").Where("status = ?", "active")
+	// ⭐ scope: เว็บใครเว็บมัน — เห็นเฉพาะของตัวเอง
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id IS NULL")
+	}
+	query.Order("lottery_type_id ASC").Find(&settings)
 	ok(c, settings)
 }
 
 // UpsertAffiliateSetting สร้างหรืออัพเดท setting
 // Body: { "lottery_type_id": null|1, "commission_rate": 0.8, "withdrawal_min": 10, "withdrawal_note": "..." }
 func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
+	// ⭐ ดึง scope — node สร้าง/แก้ได้เฉพาะ settings ของตัวเอง
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req struct {
 		LotteryTypeID  *int64  `json:"lottery_type_id"`  // nil = default
 		CommissionRate float64 `json:"commission_rate" binding:"required,min=0,max=100"`
@@ -1333,8 +1898,14 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 	agentID := int64(1)
 
 	// ⭐ Upsert: หาทุก status (รวม inactive) — ป้องกัน duplicate
+	// scope ตามสายงาน: node หา/สร้างเฉพาะ settings ของตัวเอง
 	var existing model.AffiliateSettings
 	query := h.DB.Where("agent_id = ?", agentID)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id IS NULL")
+	}
 	if req.LotteryTypeID == nil {
 		query = query.Where("lottery_type_id IS NULL")
 	} else {
@@ -1345,6 +1916,7 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 		// ไม่มีเลย → สร้างใหม่
 		setting := model.AffiliateSettings{
 			AgentID:        agentID,
+			AgentNodeID:    scope.SettingNodeID(), // ⭐ admin=nil, node=&nodeID
 			LotteryTypeID:  req.LotteryTypeID,
 			CommissionRate: req.CommissionRate,
 			WithdrawalMin:  req.WithdrawalMin,
@@ -1369,13 +1941,25 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 }
 
 func (h *Handler) DeleteAffiliateSetting(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node ลบ settings ของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	h.DB.Model(&model.AffiliateSettings{}).Where("id = ?", id).Update("status", "inactive")
+	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะ settings ของตัวเอง
+	query := h.DB.Model(&model.AffiliateSettings{}).Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Update("status", "inactive")
+	if result.RowsAffected == 0 {
+		fail(c, 404, "ไม่พบ setting นี้หรือไม่มีสิทธิ์ลบ"); return
+	}
 	ok(c, gin.H{"id": id, "status": "inactive"})
 }
 
 // GetAffiliateReport รายงาน commission ทั้งหมด (สำหรับ agent ดู)
 func (h *Handler) GetAffiliateReport(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	type CommSummary struct {
 		MemberID         int64   `json:"member_id"`
 		Username         string  `json:"username"`
@@ -1384,10 +1968,14 @@ func (h *Handler) GetAffiliateReport(c *gin.Context) {
 		PendingComm      float64 `json:"pending_commission"`
 	}
 	var report []CommSummary
-	h.DB.Table("referral_commissions rc").
+	query := h.DB.Table("referral_commissions rc").
 		Select("rc.referrer_id as member_id, m.username, COUNT(DISTINCT rc.referred_id) as total_referred, COALESCE(SUM(rc.commission_amount), 0) as total_commission, COALESCE(SUM(CASE WHEN rc.status='pending' THEN rc.commission_amount ELSE 0 END), 0) as pending_commission").
-		Joins("LEFT JOIN members m ON m.id = rc.referrer_id").
-		Group("rc.referrer_id, m.username").
+		Joins("LEFT JOIN members m ON m.id = rc.referrer_id")
+	// ⭐ node เห็นเฉพาะ commissions ของ members ในสาย
+	if scope.IsNode {
+		query = query.Where("rc.referrer_id IN ?", scope.MemberIDsForSQL())
+	}
+	query.Group("rc.referrer_id, m.username").
 		Order("total_commission DESC").
 		Scan(&report)
 
@@ -1399,16 +1987,30 @@ func (h *Handler) GetAffiliateReport(c *gin.Context) {
 // =============================================================================
 
 // ListShareTemplates ดึง templates ทั้งหมดของ agent
+// ⭐ Node Scope: node เห็นเฉพาะ templates ของตัวเอง, admin เห็นของระบบกลาง
 func (h *Handler) ListShareTemplates(c *gin.Context) {
+	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	agentID := int64(1)
 	var templates []model.ShareTemplate
-	h.DB.Where("agent_id = ?", agentID).Order("sort_order ASC, id ASC").Find(&templates)
+	query := h.DB.Where("agent_id = ?", agentID)
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของระบบกลาง
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id IS NULL")
+	}
+	query.Order("sort_order ASC, id ASC").Find(&templates)
 	ok(c, templates)
 }
 
 // CreateShareTemplate สร้าง template ใหม่
 // Body: { "name": "...", "content": "สมัครเลย! {link}", "platform": "all", "sort_order": 0 }
 func (h *Handler) CreateShareTemplate(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ SettingNodeID() เพื่อ set agent_node_id ตอน INSERT
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req struct {
 		Name      string `json:"name" binding:"required"`
 		Content   string `json:"content" binding:"required"`
@@ -1423,19 +2025,24 @@ func (h *Handler) CreateShareTemplate(c *gin.Context) {
 	}
 
 	tmpl := model.ShareTemplate{
-		AgentID:   agentID,
-		Name:      req.Name,
-		Content:   req.Content,
-		Platform:  req.Platform,
-		SortOrder: req.SortOrder,
-		Status:    "active",
+		AgentID:     agentID,
+		AgentNodeID: scope.SettingNodeID(), // ⭐ admin=nil (ระบบกลาง), node=&nodeID (เฉพาะ node)
+		Name:        req.Name,
+		Content:     req.Content,
+		Platform:    req.Platform,
+		SortOrder:   req.SortOrder,
+		Status:      "active",
 	}
 	if err := h.DB.Create(&tmpl).Error; err != nil { fail(c, 500, "สร้าง template ไม่สำเร็จ"); return }
 	ok(c, tmpl)
 }
 
 // UpdateShareTemplate แก้ไข template
+// ⭐ Node Scope: node แก้ได้เฉพาะ template ของตัวเอง
 func (h *Handler) UpdateShareTemplate(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ filter WHERE เพื่อป้องกัน node แก้ข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var req struct {
@@ -1447,8 +2054,13 @@ func (h *Handler) UpdateShareTemplate(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
+	// ⭐ scope ตามสายงาน: node ต้องเป็นเจ้าของ template ถึงจะแก้ได้
 	var tmpl model.ShareTemplate
-	if err := h.DB.First(&tmpl, id).Error; err != nil { fail(c, 404, "ไม่พบ template"); return }
+	findQuery := h.DB.Where("id = ?", id)
+	if scope.IsNode {
+		findQuery = findQuery.Where("agent_node_id = ?", scope.NodeID)
+	}
+	if err := findQuery.First(&tmpl).Error; err != nil { fail(c, 404, "ไม่พบ template หรือไม่มีสิทธิ์แก้ไข"); return }
 
 	updates := make(map[string]interface{})
 	if req.Name != nil { updates["name"] = *req.Name }
@@ -1463,9 +2075,21 @@ func (h *Handler) UpdateShareTemplate(c *gin.Context) {
 }
 
 // DeleteShareTemplate ลบ template (soft delete → status=inactive)
+// ⭐ Node Scope: node ลบได้เฉพาะ template ของตัวเอง
 func (h *Handler) DeleteShareTemplate(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node ลบข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	h.DB.Model(&model.ShareTemplate{}).Where("id = ?", id).Update("status", "inactive")
+	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะของตัวเอง
+	query := h.DB.Model(&model.ShareTemplate{}).Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Update("status", "inactive")
+	if result.RowsAffected == 0 {
+		fail(c, 404, "ไม่พบ template หรือไม่มีสิทธิ์ลบ"); return
+	}
 	ok(c, gin.H{"id": id, "status": "deleted"})
 }
 
@@ -1631,11 +2255,24 @@ func (h *Handler) ListDepositRequests(c *gin.Context) {
 	var rows []DepositRow
 	var total int64
 
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
+
 	query := h.DB.Table("deposit_requests d").
 		Select("d.id, d.member_id, m.username, d.amount, d.status, d.slip_url, COALESCE(d.auto_matched, 0) AS auto_matched, d.created_at").
 		Joins("LEFT JOIN members m ON m.id = d.member_id")
+	// ⭐ node เห็นเฉพาะ deposits ของ members ในสาย
+	if scope.IsNode {
+		query = query.Where("d.member_id IN ?", scope.MemberIDsForSQL())
+	}
 	if status != "" {
 		query = query.Where("d.status = ?", status)
+	}
+	// ⭐ Date filter — date_from / date_to (format: 2006-01-02)
+	if df := c.Query("date_from"); df != "" {
+		query = query.Where("d.created_at >= ?", df+" 00:00:00")
+	}
+	if dt := c.Query("date_to"); dt != "" {
+		query = query.Where("d.created_at <= ?", dt+" 23:59:59")
 	}
 	query.Count(&total)
 	query.Order("d.created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Scan(&rows)
@@ -1648,6 +2285,7 @@ func (h *Handler) ListDepositRequests(c *gin.Context) {
 func (h *Handler) ApproveDeposit(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 
 	// ดึง request
 	var amount float64
@@ -1660,6 +2298,7 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 	if reqStatus != "pending" {
 		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
 	}
+	if !scope.HasMember(memberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐ scope
 
 	tx := h.DB.Begin()
 
@@ -1672,9 +2311,9 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 	tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", amount, memberID)
 
 	// สร้าง transaction record
-	tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-		VALUES (1, ?, 'deposit', ?, ?, ?, 'deposit_request', ?, ?)`,
-		memberID, amount, balanceBefore, balanceBefore+amount, "อนุมัติโดยแอดมิน #"+strconv.FormatInt(adminID, 10), now)
+	tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+		VALUES (1, ?, 'deposit', ?, ?, ?, ?, 'deposit_request', ?, ?)`,
+		memberID, amount, balanceBefore, balanceBefore+amount, id, "อนุมัติโดยแอดมิน #"+strconv.FormatInt(adminID, 10), now)
 
 	// ─── First Deposit Bonus ──────────────────────────────────
 	// เช็คว่าเป็นการฝากครั้งแรกหรือไม่ + settings เปิดโบนัสอยู่
@@ -1717,9 +2356,9 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 					tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", bonus, memberID)
 
 					// สร้าง bonus transaction
-					tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-						VALUES (1, ?, 'bonus', ?, ?, ?, 'first_deposit', ?, ?)`,
-						memberID, bonus, balanceAfterDeposit, balanceAfterDeposit+bonus, "โบนัสฝากครั้งแรก", now)
+					tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+						VALUES (1, ?, 'bonus', ?, ?, ?, ?, 'first_deposit', ?, ?)`,
+						memberID, bonus, balanceAfterDeposit, balanceAfterDeposit+bonus, id, "โบนัสฝากครั้งแรก", now)
 
 					// ─── ตั้ง turnover requirement ───────────
 					// turnover = (ยอดฝาก + โบนัส) * turnover_multiplier
@@ -1743,6 +2382,10 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 func (h *Handler) RejectDeposit(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	var depMemberID int64
+	h.DB.Table("deposit_requests").Select("member_id").Where("id = ?", id).Row().Scan(&depMemberID)
+	if !scope.HasMember(depMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 
 	var req struct {
 		Reason string `json:"reason"`
@@ -1774,6 +2417,10 @@ func (h *Handler) RejectDeposit(c *gin.Context) {
 func (h *Handler) CancelDeposit(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	var cdMemberID int64
+	h.DB.Table("deposit_requests").Select("member_id").Where("id = ?", id).Row().Scan(&cdMemberID)
+	if !scope.HasMember(cdMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 
 	var req struct {
 		Reason string `json:"reason"`
@@ -1821,17 +2468,17 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
 
 		// บันทึก transaction — หักเครดิตคืน
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-			VALUES (1, ?, 'admin_debit', ?, ?, ?, 'deposit_cancel', ?, ?)`,
-			memberID, -amount, balanceAfter+amount, balanceAfter,
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', ?, ?, ?, ?, 'deposit_cancel', ?, ?)`,
+			memberID, -amount, balanceAfter+amount, balanceAfter, id,
 			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
 	} else {
 		// ⭐ refund=false → ยกเลิกอย่างเดียว ไม่หักเงิน แต่บันทึก audit trail
 		var balance float64
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-			VALUES (1, ?, 'admin_debit', 0, ?, ?, 'deposit_cancel_no_refund', ?, ?)`,
-			memberID, balance, balance,
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', 0, ?, ?, ?, 'deposit_cancel_no_refund', ?, ?)`,
+			memberID, balance, balance, id,
 			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+" (ไม่หักเครดิต): "+req.Reason, now)
 	}
 
@@ -1867,11 +2514,24 @@ func (h *Handler) ListWithdrawRequests(c *gin.Context) {
 	var rows []WithdrawRow
 	var total int64
 
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
+
 	query := h.DB.Table("withdraw_requests w").
 		Select("w.id, w.member_id, m.username, w.amount, w.bank_code, w.bank_account_number, w.bank_account_name, w.status, w.created_at").
 		Joins("LEFT JOIN members m ON m.id = w.member_id")
+	// ⭐ node เห็นเฉพาะ withdrawals ของ members ในสาย
+	if scope.IsNode {
+		query = query.Where("w.member_id IN ?", scope.MemberIDsForSQL())
+	}
 	if status != "" {
 		query = query.Where("w.status = ?", status)
+	}
+	// ⭐ Date filter — date_from / date_to (format: 2006-01-02)
+	if df := c.Query("date_from"); df != "" {
+		query = query.Where("w.created_at >= ?", df+" 00:00:00")
+	}
+	if dt := c.Query("date_to"); dt != "" {
+		query = query.Where("w.created_at <= ?", dt+" 23:59:59")
 	}
 	query.Count(&total)
 	query.Order("w.created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Scan(&rows)
@@ -1888,6 +2548,10 @@ func (h *Handler) ListWithdrawRequests(c *gin.Context) {
 func (h *Handler) ApproveWithdraw(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	var awMemberID int64
+	h.DB.Table("withdraw_requests").Select("member_id").Where("id = ?", id).Row().Scan(&awMemberID)
+	if !scope.HasMember(awMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 
 	var req struct {
 		Mode string `json:"mode"` // "auto" = โอนอัตโนมัติ, "manual" = โอนเอง
@@ -1970,6 +2634,10 @@ func (h *Handler) ApproveWithdraw(c *gin.Context) {
 func (h *Handler) RejectWithdraw(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	var rwMemberID int64
+	h.DB.Table("withdraw_requests").Select("member_id").Where("id = ?", id).Row().Scan(&rwMemberID)
+	if !scope.HasMember(rwMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 
 	var req struct {
 		Refund *bool  `json:"refund"` // default true — คืนเงิน
@@ -2014,17 +2682,17 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
 
 		// บันทึก transaction คืนเงิน
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-			VALUES (1, ?, 'refund', ?, ?, ?, 'withdraw_reject', ?, ?)`,
-			memberID, amount, balanceAfter-amount, balanceAfter,
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			VALUES (1, ?, 'refund', ?, ?, ?, ?, 'withdraw_reject', ?, ?)`,
+			memberID, amount, balanceAfter-amount, balanceAfter, id,
 			"คืนเงินถอน #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
 	} else {
 		// ⭐ refund=false → ไม่คืนเงิน (ทุจริต) แต่บันทึก audit trail
 		var balance float64
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
-			VALUES (1, ?, 'admin_debit', 0, ?, ?, 'withdraw_reject_no_refund', ?, ?)`,
-			memberID, balance, balance,
+		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			VALUES (1, ?, 'admin_debit', 0, ?, ?, ?, 'withdraw_reject_no_refund', ?, ?)`,
+			memberID, balance, balance, id,
 			"ปฏิเสธถอน #"+strconv.FormatInt(id, 10)+" (ไม่คืนเครดิต/ทุจริต): "+req.Reason, now)
 	}
 
@@ -2039,7 +2707,12 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 // ListAutoBanRules ดูกฎอั้นทั้งหมด (filter by lottery_type_id)
 // GET /api/v1/auto-ban-rules?lottery_type_id=1
 func (h *Handler) ListAutoBanRules(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	query := h.DB.Model(&model.AutoBanRule{}).Where("status = ?", "active")
+	// ⭐ node เห็นเฉพาะกฎของตัวเอง (ไม่เห็นของคนอื่น)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
 	if lt := c.Query("lottery_type_id"); lt != "" {
 		query = query.Where("lottery_type_id = ?", lt)
 	}
@@ -2051,6 +2724,7 @@ func (h *Handler) ListAutoBanRules(c *gin.Context) {
 // CreateAutoBanRule สร้างกฎอั้น 1 กฎ
 // POST /api/v1/auto-ban-rules
 func (h *Handler) CreateAutoBanRule(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var rule model.AutoBanRule
 	if err := c.ShouldBindJSON(&rule); err != nil {
 		fail(c, 400, err.Error())
@@ -2061,6 +2735,11 @@ func (h *Handler) CreateAutoBanRule(c *gin.Context) {
 	rule.UpdatedAt = time.Now()
 	if rule.AgentID == 0 {
 		rule.AgentID = 1
+	}
+	// ⭐ node user: ตั้ง agent_node_id ให้กฎเป็นของ node ตัวเอง
+	if scope.IsNode {
+		nid := scope.NodeID
+		rule.AgentNodeID = &nid
 	}
 	if err := h.DB.Create(&rule).Error; err != nil {
 		fail(c, 500, "failed to create auto-ban rule")
@@ -2073,6 +2752,7 @@ func (h *Handler) CreateAutoBanRule(c *gin.Context) {
 // POST /api/v1/auto-ban-rules/bulk
 // Body: { "rules": [...], "lottery_type_id": 1, "capital": 100000, "max_loss": 20000 }
 func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var req struct {
 		LotteryTypeID int64 `json:"lottery_type_id" binding:"required"`
 		Capital       float64 `json:"capital"`
@@ -2091,12 +2771,21 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 	}
 
 	// ลบกฎเก่าของ lottery type นี้ก่อน (soft delete)
-	h.DB.Model(&model.AutoBanRule{}).
-		Where("lottery_type_id = ? AND status = ?", req.LotteryTypeID, "active").
-		Update("status", "inactive")
+	// ⭐ node user: ลบเฉพาะกฎของ node ตัวเอง (ไม่ลบกฎของระบบ)
+	deleteQ := h.DB.Model(&model.AutoBanRule{}).
+		Where("lottery_type_id = ? AND status = ?", req.LotteryTypeID, "active")
+	if scope.IsNode {
+		deleteQ = deleteQ.Where("agent_node_id IN ?", scope.NodeIDs)
+	}
+	deleteQ.Update("status", "inactive")
 
 	// สร้างกฎใหม่ทั้งหมด
 	now := time.Now()
+	var nodeIDPtr *int64
+	if scope.IsNode {
+		nid := scope.NodeID
+		nodeIDPtr = &nid
+	}
 	created := make([]model.AutoBanRule, 0, len(req.Rules))
 	for _, r := range req.Rules {
 		action := r.Action
@@ -2105,6 +2794,7 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 		}
 		rule := model.AutoBanRule{
 			AgentID:         1,
+			AgentNodeID:     nodeIDPtr, // ⭐ NULL=ทั้งระบบ (admin), มีค่า=เฉพาะ node
 			LotteryTypeID:   req.LotteryTypeID,
 			BetType:         r.BetType,
 			ThresholdAmount: r.ThresholdAmount,
@@ -2132,10 +2822,15 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 // PUT /api/v1/auto-ban-rules/:id
 func (h *Handler) UpdateAutoBanRule(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var rule model.AutoBanRule
 	if err := h.DB.First(&rule, id).Error; err != nil {
 		fail(c, 404, "rule not found")
 		return
+	}
+	// ⭐ node user: แก้ได้เฉพาะกฎของ node ตัวเอง
+	if scope.IsNode && (rule.AgentNodeID == nil || !func() bool { for _, nid := range scope.NodeIDs { if nid == *rule.AgentNodeID { return true } }; return false }()) {
+		fail(c, 403, "ไม่สามารถแก้ไขกฎของระบบได้"); return
 	}
 	var req struct {
 		ThresholdAmount *float64 `json:"threshold_amount"`
@@ -2163,6 +2858,15 @@ func (h *Handler) UpdateAutoBanRule(c *gin.Context) {
 // DELETE /api/v1/auto-ban-rules/:id
 func (h *Handler) DeleteAutoBanRule(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
+	// ⭐ node user: ลบได้เฉพาะกฎของ node ตัวเอง
+	if scope.IsNode {
+		var rule model.AutoBanRule
+		h.DB.First(&rule, id)
+		if rule.AgentNodeID == nil || !func() bool { for _, nid := range scope.NodeIDs { if nid == *rule.AgentNodeID { return true } }; return false }() {
+			fail(c, 403, "ไม่สามารถลบกฎของระบบได้"); return
+		}
+	}
 	h.DB.Model(&model.AutoBanRule{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"status":     "inactive",
 		"updated_at": time.Now(),
@@ -2178,13 +2882,16 @@ func (h *Handler) DeleteAutoBanRule(c *gin.Context) {
 // GET /api/v1/yeekee/rounds?status=shooting&date=2026-04-02&page=1&per_page=20
 func (h *Handler) ListYeekeeRounds(c *gin.Context) {
 	page, perPage := pageParams(c)
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var rounds []model.YeekeeRound
 	var total int64
 
 	query := h.DB.Model(&model.YeekeeRound{})
 
-	// ⭐ Multi-agent: filter ตาม agent_id (query param หรือ default=1)
-	if aidStr := c.Query("agent_id"); aidStr != "" {
+	// ⭐ scope: ยี่กีเว็บใครเว็บมัน
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else if aidStr := c.Query("agent_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
 		if aid > 0 { query = query.Where("agent_id = ?", aid) }
 	}
@@ -2289,6 +2996,7 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 		WaitingCount   int64   `json:"waiting_count"`
 		ShootingCount  int64   `json:"shooting_count"`
 		ResultedCount  int64   `json:"resulted_count"`
+		MissedCount    int64   `json:"missed_count"`
 		TotalShoots    int64   `json:"total_shoots"`
 		TotalBets      int64   `json:"total_bets"`
 		TotalBetAmount float64 `json:"total_bet_amount"`
@@ -2296,9 +3004,12 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 		Profit         float64 `json:"profit"`
 	}
 
-	// ⭐ Multi-agent: base query filter
+	// ⭐ scope: ยี่กีเว็บใครเว็บมัน
+	scope := mw.GetNodeScope(c, h.DB)
 	baseQuery := h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today)
-	if aidStr := c.Query("agent_id"); aidStr != "" {
+	if scope.IsNode {
+		baseQuery = baseQuery.Where("agent_node_id = ?", scope.NodeID)
+	} else if aidStr := c.Query("agent_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
 		if aid > 0 { baseQuery = baseQuery.Where("agent_id = ?", aid) }
 	}
@@ -2308,6 +3019,7 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 	baseQuery.Session(&gorm.Session{}).Where("status = ?", "waiting").Count(&stats.WaitingCount)
 	baseQuery.Session(&gorm.Session{}).Where("status = ?", "shooting").Count(&stats.ShootingCount)
 	baseQuery.Session(&gorm.Session{}).Where("status = ?", "resulted").Count(&stats.ResultedCount)
+	baseQuery.Session(&gorm.Session{}).Where("status = ?", "missed").Count(&stats.MissedCount)
 
 	// นับ shoots วันนี้ (filter agent ผ่าน yeekee_rounds join)
 	shootQuery := h.DB.Model(&model.YeekeeShoot{}).
@@ -2346,13 +3058,21 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 
 // ListStaff รายการ admin ทั้งหมด
 func (h *Handler) ListStaff(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope — เว็บใครเว็บมัน
 	var admins []model.Admin
-	h.DB.Where("status != ?", "deleted").Order("created_at DESC").Find(&admins)
+	query := h.DB.Where("status != ?", "deleted")
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID) // ⭐ เห็นเฉพาะพนักงานเว็บตัวเอง
+	} else {
+		query = query.Where("agent_node_id IS NULL") // admin เห็นเฉพาะพนักงานระดับระบบ
+	}
+	query.Order("created_at DESC").Find(&admins)
 	ok(c, admins)
 }
 
-// CreateStaff เพิ่ม admin ใหม่
+// CreateStaff เพิ่ม admin ใหม่ — ⭐ สร้างภายใต้เว็บของผู้สร้าง
 func (h *Handler) CreateStaff(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var req struct {
 		Username    string `json:"username" binding:"required,min=3,max=50"`
 		Password    string `json:"password" binding:"required,min=6,max=100"`
@@ -2373,6 +3093,7 @@ func (h *Handler) CreateStaff(c *gin.Context) {
 	admin := model.Admin{
 		Username: req.Username, PasswordHash: string(hash),
 		Name: req.Name, Role: req.Role, Permissions: req.Permissions, Status: "active",
+		AgentNodeID: scope.SettingNodeID(), // ⭐ สร้างภายใต้เว็บของผู้สร้าง
 	}
 	if err := h.DB.Create(&admin).Error; err != nil { fail(c, 500, "failed to create admin"); return }
 	ok(c, admin)
@@ -2734,5 +3455,228 @@ func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
 		"lottery_type_id": yeekeeTypeID,
 		"enabled":         req.Enabled,
 		"message":         action + "ยี่กีสำเร็จ",
+	})
+}
+
+// =============================================================================
+// ManualSettleYeekeeRound — แอดมินกดออกผลยี่กี manual (รอบที่ missed)
+// POST /api/v1/yeekee/rounds/:id/settle
+//
+// ใช้เมื่อรอบยี่กีถูก mark เป็น "missed" (server ปิดระหว่างรอบ)
+// แอดมินกดปุ่มออกผลเอง → คำนวณผลจาก Hash Commitment + settle bets
+// =============================================================================
+func (h *Handler) ManualSettleYeekeeRound(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	// ดึงรอบยี่กี
+	var yr model.YeekeeRound
+	if err := h.DB.First(&yr, id).Error; err != nil {
+		fail(c, 404, "ไม่พบรอบยี่กี")
+		return
+	}
+
+	// ต้องเป็น missed เท่านั้น (ไม่ให้กด settle รอบที่ resulted แล้ว)
+	if yr.Status != "missed" {
+		fail(c, 400, "รอบนี้ status='"+yr.Status+"' — กดออกผลได้เฉพาะรอบที่ missed เท่านั้น")
+		return
+	}
+
+	// อัพเดท → calculating
+	h.DB.Model(&yr).Update("status", "calculating")
+
+	// ดึงเลขยิง
+	var shoots []model.YeekeeShoot
+	h.DB.Where("yeekee_round_id = ?", yr.ID).Find(&shoots)
+
+	now := time.Now()
+
+	if len(shoots) == 0 {
+		// ไม่มีคนยิง → mark resulted ไม่มีผล
+		h.DB.Model(&yr).Updates(map[string]interface{}{"status": "resulted", "total_shoots": 0})
+		h.DB.Model(&model.LotteryRound{}).Where("id = ?", yr.LotteryRoundID).
+			Updates(map[string]interface{}{"status": "resulted", "resulted_at": &now})
+
+		logManualSettle(h.DB, c, yr, "", "no_shoots")
+		ok(c, gin.H{"message": "ออกผลสำเร็จ (ไม่มีเลขยิง)", "result_number": ""})
+		return
+	}
+
+	// แปลง → lotto-core types
+	coreShots := make([]coreTypes.YeekeeShoot, 0, len(shoots))
+	for _, s := range shoots {
+		coreShots = append(coreShots, coreTypes.YeekeeShoot{
+			ID: s.ID, RoundID: s.YeekeeRoundID, MemberID: s.MemberID,
+			Number: s.Number, ShotAt: s.ShotAt,
+		})
+	}
+
+	// คำนวณผล (Hash Commitment)
+	resultNumber, roundResult, err := yeekee.CalculateResultWithSeed(yr.ServerSeed, coreShots)
+	if err != nil {
+		// fallback legacy
+		resultNumber, roundResult, err = yeekee.CalculateResult(coreShots)
+		if err != nil {
+			h.DB.Model(&yr).Update("status", "missed") // revert
+			fail(c, 500, "คำนวณผลไม่สำเร็จ: "+err.Error())
+			return
+		}
+	}
+
+	// บันทึกผลใน yeekee_round
+	h.DB.Model(&yr).Updates(map[string]interface{}{
+		"status": "resulted", "result_number": resultNumber,
+		"total_shoots": len(shoots), "total_sum": yeekee.GetShootSum(coreShots),
+	})
+
+	// บันทึกผลใน lottery_round
+	h.DB.Model(&model.LotteryRound{}).Where("id = ?", yr.LotteryRoundID).Updates(map[string]interface{}{
+		"status": "resulted", "result_top3": roundResult.Top3,
+		"result_top2": roundResult.Top2, "result_bottom2": roundResult.Bottom2,
+		"resulted_at": &now,
+	})
+
+	// Settlement — เทียบ bets + จ่ายเงิน
+	settleYeekeeBets(h.DB, yr.LotteryRoundID, yr.AgentID, roundResult)
+
+	// บันทึก action log
+	logManualSettle(h.DB, c, yr, resultNumber, "settled")
+
+	log.Printf("✅ Admin manual settle yeekee round %d: result=%s (top3=%s, top2=%s, bot2=%s)",
+		yr.RoundNo, resultNumber, roundResult.Top3, roundResult.Top2, roundResult.Bottom2)
+
+	ok(c, gin.H{
+		"message":       "ออกผลสำเร็จ",
+		"result_number": resultNumber,
+		"top3":          roundResult.Top3,
+		"top2":          roundResult.Top2,
+		"bottom2":       roundResult.Bottom2,
+		"total_shoots":  len(shoots),
+	})
+}
+
+// settleYeekeeBets เทียบ bets กับผลยี่กี + จ่ายเงินรางวัล (เหมือน member-api cron)
+func settleYeekeeBets(db *gorm.DB, lotteryRoundID int64, agentID int64, roundResult coreTypes.RoundResult) {
+	var bets []model.Bet
+	db.Where("lottery_round_id = ? AND status = ?", lotteryRoundID, "pending").
+		Preload("BetType").Find(&bets)
+
+	if len(bets) == 0 {
+		log.Printf("ℹ️ [manual-settle] No pending bets for round %d", lotteryRoundID)
+		return
+	}
+
+	coreBets := make([]coreTypes.Bet, 0, len(bets))
+	for _, b := range bets {
+		betTypeCode := ""
+		if b.BetType.Code != "" {
+			betTypeCode = b.BetType.Code
+		}
+		coreBets = append(coreBets, coreTypes.Bet{
+			ID: b.ID, MemberID: b.MemberID, RoundID: b.LotteryRoundID,
+			BetType: coreTypes.BetType(betTypeCode), Number: b.Number,
+			Amount: b.Amount, Rate: b.Rate, Status: coreTypes.BetStatusPending,
+		})
+	}
+
+	settleOutput := payout.SettleRound(payout.SettleRoundInput{
+		RoundID: lotteryRoundID, Result: roundResult, Bets: coreBets,
+	})
+
+	log.Printf("💰 [manual-settle] round=%d, agent=%d, bets=%d, winners=%d, win=%.2f",
+		lotteryRoundID, agentID, len(bets), settleOutput.TotalWinners, settleOutput.TotalWinAmount)
+
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			log.Printf("❌ [manual-settle] Payout panic: %v", r)
+		}
+	}()
+
+	now := time.Now()
+	betResultMap := make(map[int64]coreTypes.BetResult)
+	for _, br := range settleOutput.BetResults {
+		betResultMap[br.BetID] = br
+	}
+	for _, b := range bets {
+		br, ok := betResultMap[b.ID]
+		if !ok {
+			continue
+		}
+		newStatus := "lost"
+		var winAmount float64
+		if br.IsWin {
+			newStatus = "won"
+			winAmount = br.WinAmount
+		}
+		tx.Model(&model.Bet{}).Where("id = ?", b.ID).Updates(map[string]interface{}{
+			"status": newStatus, "win_amount": winAmount, "settled_at": &now,
+		})
+	}
+
+	memberPayouts := payout.GroupWinnersByMember(coreBets, settleOutput.BetResults)
+	for memberID, totalWin := range memberPayouts {
+		if totalWin <= 0 {
+			continue
+		}
+		var member model.Member
+		if err := tx.Select("id, balance").First(&member, memberID).Error; err != nil {
+			continue
+		}
+		balanceBefore := member.Balance
+		balanceAfter := balanceBefore + totalWin
+		tx.Model(&model.Member{}).Where("id = ?", memberID).
+			Update("balance", gorm.Expr("balance + ?", totalWin))
+
+		roundID := lotteryRoundID
+		winTx := model.Transaction{
+			MemberID:      memberID,
+			Type:          "win",
+			Amount:        totalWin,
+			BalanceBefore: balanceBefore,
+			BalanceAfter:  balanceAfter,
+			ReferenceID:   &roundID,
+			ReferenceType: "lottery_round",
+			CreatedAt:     now,
+		}
+		tx.Create(&winTx)
+		// agent_id ไม่อยู่ใน admin model → set ตรงผ่าน SQL
+		tx.Exec("UPDATE transactions SET agent_id = ? WHERE id = ?", agentID, winTx.ID)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		log.Printf("❌ [manual-settle] Failed to commit: %v", err)
+		return
+	}
+
+	log.Printf("✅ [manual-settle] Payout complete: %d winners credited", len(memberPayouts))
+}
+
+// logManualSettle บันทึก admin action log สำหรับการออกผลยี่กี manual
+func logManualSettle(db *gorm.DB, c *gin.Context, yr model.YeekeeRound, resultNumber string, outcome string) {
+	adminID, _ := c.Get("admin_id")
+	aid, _ := adminID.(int64)
+	if aid == 0 {
+		if aidFloat, ok := adminID.(float64); ok {
+			aid = int64(aidFloat)
+		}
+	}
+
+	details, _ := json.Marshal(map[string]interface{}{
+		"round_no":      yr.RoundNo,
+		"agent_id":      yr.AgentID,
+		"result_number": resultNumber,
+		"outcome":       outcome,
+	})
+
+	db.Create(&model.AdminActionLog{
+		AdminID:    aid,
+		Action:     "yeekee_manual_settle",
+		TargetType: "yeekee_round",
+		TargetID:   yr.ID,
+		Details:    string(details),
+		IP:         c.ClientIP(),
+		CreatedAt:  time.Now(),
 	})
 }

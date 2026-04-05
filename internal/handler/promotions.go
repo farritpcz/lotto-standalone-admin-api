@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 // =============================================================================
@@ -37,6 +39,7 @@ import (
 type promotion struct {
 	ID           int64     `json:"id" gorm:"primaryKey"`
 	AgentID      int64     `json:"agent_id" gorm:"not null;default:1;index"`
+	AgentNodeID  *int64    `json:"agent_node_id" gorm:"index"`             // ⭐ NULL=ระบบกลาง (admin), มีค่า=เฉพาะ node
 	Name         string    `json:"name" gorm:"size:200;not null"`           // ชื่อโปร เช่น "สมัครใหม่รับ 100%"
 	Type         string    `json:"type" gorm:"size:30;not null"`            // first_deposit, deposit, cashback, free_credit
 	Description  string    `json:"description" gorm:"type:text"`           // รายละเอียดโปร (HTML/plain)
@@ -62,10 +65,19 @@ func (promotion) TableName() string { return "promotions" }
 // ดึงรายการโปรโมชั่น (filter ได้ด้วย status, type)
 // =============================================================================
 func (h *Handler) ListPromotions(c *gin.Context) {
+	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var promos []promotion
 
 	// ⭐ เริ่มสร้าง query — filter ด้วย agent_id
 	q := h.DB.Where("agent_id = ? AND status != ?", 1, "deleted")
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะโปรโมชั่นของตัวเอง, admin เห็นของระบบกลาง
+	if scope.IsNode {
+		q = q.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		q = q.Where("agent_node_id IS NULL")
+	}
 
 	// Filter by status: active, inactive, expired
 	if status := c.Query("status"); status != "" {
@@ -100,6 +112,9 @@ func (h *Handler) ListPromotions(c *gin.Context) {
 // สร้างโปรโมชั่นใหม่ พร้อมเงื่อนไข + ระยะเวลา
 // =============================================================================
 func (h *Handler) CreatePromotion(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ SettingNodeID() เพื่อ set agent_node_id ตอน INSERT
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req struct {
 		Name         string  `json:"name" binding:"required"`
 		Type         string  `json:"type" binding:"required"` // first_deposit, deposit, cashback, free_credit
@@ -133,6 +148,7 @@ func (h *Handler) CreatePromotion(c *gin.Context) {
 
 	promo := promotion{
 		AgentID:      1,
+		AgentNodeID:  scope.SettingNodeID(), // ⭐ admin=nil (ระบบกลาง), node=&nodeID (เฉพาะ node)
 		Name:         req.Name,
 		Type:         req.Type,
 		Description:  req.Description,
@@ -163,6 +179,9 @@ func (h *Handler) CreatePromotion(c *gin.Context) {
 // แก้ไขโปรโมชั่น — partial update
 // =============================================================================
 func (h *Handler) UpdatePromotion(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ filter WHERE เพื่อป้องกัน node แก้ข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var req struct {
@@ -234,9 +253,14 @@ func (h *Handler) UpdatePromotion(c *gin.Context) {
 
 	updates["updated_at"] = time.Now()
 
-	result := h.DB.Table("promotions").Where("id = ? AND agent_id = 1", id).Updates(updates)
+	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะโปรโมชั่นของตัวเอง
+	query := h.DB.Table("promotions").Where("id = ? AND agent_id = 1", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Updates(updates)
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบโปรโมชั่นนี้")
+		fail(c, 404, "ไม่พบโปรโมชั่นนี้หรือไม่มีสิทธิ์แก้ไข")
 		return
 	}
 
@@ -250,15 +274,23 @@ func (h *Handler) UpdatePromotion(c *gin.Context) {
 // ลบโปรโมชั่น (soft delete → status = "deleted")
 // =============================================================================
 func (h *Handler) DeletePromotion(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node ลบข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	// ⭐ soft delete — เปลี่ยน status เป็น deleted (ไม่ลบจาก DB จริง)
-	result := h.DB.Table("promotions").Where("id = ? AND agent_id = 1", id).Updates(map[string]interface{}{
+	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะของตัวเอง
+	query := h.DB.Table("promotions").Where("id = ? AND agent_id = 1", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Updates(map[string]interface{}{
 		"status":     "deleted",
 		"updated_at": time.Now(),
 	})
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบโปรโมชั่นนี้")
+		fail(c, 404, "ไม่พบโปรโมชั่นนี้หรือไม่มีสิทธิ์ลบ")
 		return
 	}
 
@@ -270,6 +302,9 @@ func (h *Handler) DeletePromotion(c *gin.Context) {
 // เปิด/ปิดโปรโมชั่น
 // =============================================================================
 func (h *Handler) UpdatePromotionStatus(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node เปลี่ยนสถานะโปรโมชั่นของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var req struct {
@@ -286,12 +321,17 @@ func (h *Handler) UpdatePromotionStatus(c *gin.Context) {
 		return
 	}
 
-	result := h.DB.Table("promotions").Where("id = ? AND agent_id = 1", id).Updates(map[string]interface{}{
+	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะของตัวเอง
+	query := h.DB.Table("promotions").Where("id = ? AND agent_id = 1", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Updates(map[string]interface{}{
 		"status":     req.Status,
 		"updated_at": time.Now(),
 	})
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบโปรโมชั่นนี้")
+		fail(c, 404, "ไม่พบโปรโมชั่นนี้หรือไม่มีสิทธิ์แก้ไข")
 		return
 	}
 

@@ -62,9 +62,13 @@ func AdminJWTAuth(secret string) gin.HandlerFunc {
 		}
 
 		// เก็บ admin info ใน context
+		// ⭐ role="node" หมายถึง login จาก agent_nodes (สายงาน)
+		// AdminID จะเป็น node.ID, Role = "node"
 		c.Set("admin_id", claims.AdminID)
 		c.Set("admin_username", claims.Username)
 		c.Set("admin_role", claims.Role)
+		// ⭐ flag สำหรับเช็คว่าเป็น node user
+		c.Set("is_node_user", claims.Role == "node")
 
 		c.Next()
 	}

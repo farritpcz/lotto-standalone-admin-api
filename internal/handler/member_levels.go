@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 // =============================================================================
@@ -37,6 +39,7 @@ import (
 type memberLevel struct {
 	ID             int64     `json:"id" gorm:"primaryKey"`
 	AgentID        int64     `json:"agent_id" gorm:"not null;default:1;index"`       // ⭐ 1 agent = 1 ชุด levels
+	AgentNodeID    *int64    `json:"agent_node_id" gorm:"index"`                      // ⭐ NULL=ระบบกลาง (admin), มีค่า=เฉพาะ node
 	Name           string    `json:"name" gorm:"size:50;not null"`                    // ชื่อ level เช่น "Bronze"
 	Color          string    `json:"color" gorm:"size:20;not null;default:#CD7F32"`   // สีแสดงใน UI
 	Icon           string    `json:"icon" gorm:"size:50"`                              // icon (Lucide name)
@@ -61,10 +64,20 @@ func (memberLevel) TableName() string { return "member_levels" }
 // ดึง level ทั้งหมด + นับจำนวนสมาชิกในแต่ละ level
 // =============================================================================
 func (h *Handler) ListMemberLevels(c *gin.Context) {
+	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var levels []memberLevel
 
 	// ดึง levels ทั้งหมด เรียงตาม sort_order (น้อย→มาก)
-	if err := h.DB.Where("agent_id = ?", 1).Order("sort_order ASC, id ASC").Find(&levels).Error; err != nil {
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะ levels ของตัวเอง, admin เห็นของระบบกลาง
+	query := h.DB.Where("agent_id = ?", 1)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id IS NULL")
+	}
+	if err := query.Order("sort_order ASC, id ASC").Find(&levels).Error; err != nil {
 		fail(c, 500, "ดึงข้อมูล level ไม่สำเร็จ")
 		return
 	}
@@ -102,6 +115,9 @@ func (h *Handler) ListMemberLevels(c *gin.Context) {
 // สร้าง level ใหม่ พร้อมเงื่อนไข + ผลประโยชน์
 // =============================================================================
 func (h *Handler) CreateMemberLevel(c *gin.Context) {
+	// ⭐ ดึง scope — ใช�� SettingNodeID() เพื่อ set agent_node_id ตอน INSERT
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req struct {
 		Name           string  `json:"name" binding:"required,min=1,max=50"`
 		Color          string  `json:"color" binding:"required"`        // hex color เช่น "#FFD700"
@@ -121,8 +137,15 @@ func (h *Handler) CreateMemberLevel(c *gin.Context) {
 	}
 
 	// ⭐ ตรวจชื่อซ้ำในระบบเดียวกัน (agent_id = 1)
+	// ⭐ scope ตามสายงาน — ตรวจชื่อซ้ำเฉพาะใน scope ของ node/admin
 	var exists int64
-	h.DB.Table("member_levels").Where("agent_id = 1 AND name = ?", req.Name).Count(&exists)
+	dupeQuery := h.DB.Table("member_levels").Where("agent_id = 1 AND name = ?", req.Name)
+	if scope.IsNode {
+		dupeQuery = dupeQuery.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		dupeQuery = dupeQuery.Where("agent_node_id IS NULL")
+	}
+	dupeQuery.Count(&exists)
 	if exists > 0 {
 		fail(c, 400, "ชื่อ level \""+req.Name+"\" มีอยู่แล้ว")
 		return
@@ -130,6 +153,7 @@ func (h *Handler) CreateMemberLevel(c *gin.Context) {
 
 	level := memberLevel{
 		AgentID:        1,
+		AgentNodeID:    scope.SettingNodeID(), // ⭐ admin=nil (ระบบกลาง), node=&nodeID (เฉพาะ node)
 		Name:           req.Name,
 		Color:          req.Color,
 		Icon:           req.Icon,
@@ -159,6 +183,9 @@ func (h *Handler) CreateMemberLevel(c *gin.Context) {
 // แก้ไข level — อัพเดทเฉพาะ fields ที่ส่งมา
 // =============================================================================
 func (h *Handler) UpdateMemberLevel(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ filter WHERE เพื่อป้องกัน node แก้ข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var req struct {
@@ -226,9 +253,14 @@ func (h *Handler) UpdateMemberLevel(c *gin.Context) {
 
 	updates["updated_at"] = time.Now()
 
-	result := h.DB.Table("member_levels").Where("id = ? AND agent_id = 1", id).Updates(updates)
+	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะ level ของตัวเอง
+	query := h.DB.Table("member_levels").Where("id = ? AND agent_id = 1", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Updates(updates)
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบ level นี้")
+		fail(c, 404, "ไม่พบ level นี้หรือไม่มีสิทธิ์แก้ไข")
 		return
 	}
 
@@ -243,6 +275,9 @@ func (h *Handler) UpdateMemberLevel(c *gin.Context) {
 // ลบ level — ต้องไม่มีสมาชิกอยู่ใน level นี้
 // =============================================================================
 func (h *Handler) DeleteMemberLevel(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node ลบข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	// ⭐ ตรวจว่ามีสมาชิกอยู่ใน level นี้หรือไม่
@@ -253,9 +288,16 @@ func (h *Handler) DeleteMemberLevel(c *gin.Context) {
 		return
 	}
 
-	result := h.DB.Exec("DELETE FROM member_levels WHERE id = ? AND agent_id = 1", id)
+	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะ level ของตัวเอง
+	delQuery := "DELETE FROM member_levels WHERE id = ? AND agent_id = 1"
+	delArgs := []interface{}{id}
+	if scope.IsNode {
+		delQuery += " AND agent_node_id = ?"
+		delArgs = append(delArgs, scope.NodeID)
+	}
+	result := h.DB.Exec(delQuery, delArgs...)
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบ level นี้")
+		fail(c, 404, "ไม่พบ level นี้หรือไม่มีสิทธิ์ลบ")
 		return
 	}
 
@@ -268,6 +310,9 @@ func (h *Handler) DeleteMemberLevel(c *gin.Context) {
 // ⭐ รับ array ของ {id, sort_order} → อัพเดท sort_order ทีเดียว
 // =============================================================================
 func (h *Handler) ReorderMemberLevels(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node จัดลำดับข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req struct {
 		Orders []struct {
 			ID        int64 `json:"id" binding:"required"`
@@ -280,9 +325,14 @@ func (h *Handler) ReorderMemberLevels(c *gin.Context) {
 	}
 
 	// ⭐ อัพเดททีละ row (ใน transaction เดียว)
+	// ⭐ scope ตามสายงาน: node อัพเดทได้เฉพาะของตัวเอง
 	tx := h.DB.Begin()
 	for _, o := range req.Orders {
-		tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_id = 1", o.SortOrder, o.ID)
+		if scope.IsNode {
+			tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_id = 1 AND agent_node_id = ?", o.SortOrder, o.ID, scope.NodeID)
+		} else {
+			tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_id = 1", o.SortOrder, o.ID)
+		}
 	}
 	tx.Commit()
 

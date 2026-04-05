@@ -12,11 +12,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
 type agentBankAccount struct {
 	ID            int64  `json:"id" gorm:"primaryKey"`
 	AgentID       int64  `json:"agent_id"`
+	AgentNodeID   *int64 `json:"agent_node_id" gorm:"index"` // ⭐ NULL=ระบบกลาง (admin), มีค่า=เฉพาะ node
 	BankCode      string `json:"bank_code"`
 	BankName      string `json:"bank_name"`
 	AccountNumber string `json:"account_number"`
@@ -34,14 +37,30 @@ type agentBankAccount struct {
 func (agentBankAccount) TableName() string { return "agent_bank_accounts" }
 
 // ListAgentBankAccounts ดูบัญชีทั้งหมด
+// ⭐ Node Scope: node เห็นเฉพาะบัญชีของตัวเอง (agent_node_id = nodeID)
+//    admin เห็นบัญชีระดับระบบ (agent_node_id IS NULL)
 func (h *Handler) ListAgentBankAccounts(c *gin.Context) {
+	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var accounts []agentBankAccount
-	h.DB.Where("agent_id = ?", 1).Order("id ASC").Find(&accounts)
+	query := h.DB.Where("agent_id = ?", 1)
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของระบบกลาง
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id IS NULL")
+	}
+	query.Order("id ASC").Find(&accounts)
 	ok(c, accounts)
 }
 
 // CreateAgentBankAccount เพิ่มบัญชีใหม่
+// ⭐ Node Scope: set agent_node_id ให้ตรงกับ node ที่สร้าง (admin → NULL, node → nodeID)
 func (h *Handler) CreateAgentBankAccount(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ SettingNodeID() เพื่อ set agent_node_id ตอน INSERT
+	scope := mw.GetNodeScope(c, h.DB)
+
 	var req struct {
 		BankCode      string `json:"bank_code" binding:"required"`
 		BankName      string `json:"bank_name"`
@@ -61,10 +80,11 @@ func (h *Handler) CreateAgentBankAccount(c *gin.Context) {
 	if req.TransferMode == "" { req.TransferMode = "manual" }
 
 	now := time.Now().Format("2006-01-02 15:04:05")
+	// ⭐ INSERT พร้อม agent_node_id — admin=NULL, node=nodeID
 	result := h.DB.Exec(`INSERT INTO agent_bank_accounts
-		(agent_id, bank_code, bank_name, account_number, account_name, account_type, transfer_mode, is_default, status, bank_system, created_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		req.BankCode, req.BankName, req.AccountNumber, req.AccountName,
+		(agent_id, agent_node_id, bank_code, bank_name, account_number, account_name, account_type, transfer_mode, is_default, status, bank_system, created_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		scope.SettingNodeID(), req.BankCode, req.BankName, req.AccountNumber, req.AccountName,
 		req.AccountType, req.TransferMode, req.IsDefault, req.BankSystem, now)
 
 	if result.Error != nil {
@@ -81,7 +101,11 @@ func (h *Handler) CreateAgentBankAccount(c *gin.Context) {
 }
 
 // UpdateAgentBankAccount แก้ไขบัญชี
+// ⭐ Node Scope: node แก้ได้เฉพาะบัญชีของตัวเอง (agent_node_id = nodeID)
 func (h *Handler) UpdateAgentBankAccount(c *gin.Context) {
+	// ⭐ ดึง scope — ใช้ filter WHERE เพื่อป้องกัน node แก้ข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct {
 		BankName      string `json:"bank_name"`
@@ -107,13 +131,35 @@ func (h *Handler) UpdateAgentBankAccount(c *gin.Context) {
 		fail(c, 400, "ไม่มีข้อมูลให้อัพเดท"); return
 	}
 
-	h.DB.Table("agent_bank_accounts").Where("id = ?", id).Updates(updates)
+	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะบัญชีของตัวเอง
+	query := h.DB.Table("agent_bank_accounts").Where("id = ? AND agent_id = 1", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	}
+	result := query.Updates(updates)
+	if result.RowsAffected == 0 {
+		fail(c, 404, "ไม่พบบัญชีนี้หรือไม่มีสิทธิ์แก้ไข"); return
+	}
 	ok(c, gin.H{"id": id, "updated": updates})
 }
 
 // DeleteAgentBankAccount ลบบัญชี
+// ⭐ Node Scope: node ลบได้เฉพาะบัญชีของตัวเอง (agent_node_id = nodeID)
 func (h *Handler) DeleteAgentBankAccount(c *gin.Context) {
+	// ⭐ ดึง scope — ป้องกัน node ลบข้อมูลของ node อื่น
+	scope := mw.GetNodeScope(c, h.DB)
+
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	h.DB.Exec("DELETE FROM agent_bank_accounts WHERE id = ?", id)
+	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะของตัวเอง
+	query := "DELETE FROM agent_bank_accounts WHERE id = ? AND agent_id = 1"
+	args := []interface{}{id}
+	if scope.IsNode {
+		query += " AND agent_node_id = ?"
+		args = append(args, scope.NodeID)
+	}
+	result := h.DB.Exec(query, args...)
+	if result.RowsAffected == 0 {
+		fail(c, 404, "ไม่พบบัญชีนี้หรือไม่มีสิทธิ์ลบ"); return
+	}
 	ok(c, gin.H{"id": id, "deleted": true})
 }
