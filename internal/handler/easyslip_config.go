@@ -31,7 +31,7 @@ import (
 
 // EasySlipConfigRequest — request สำหรับสร้าง/อัพเดท config
 type EasySlipConfigRequest struct {
-	APIKey              string  `json:"api_key" binding:"required"`                   // Bearer token
+	APIKey              string  `json:"api_key"`                                      // Bearer token (ว่าง = ใช้ key เดิม)
 	Enabled             *bool   `json:"enabled"`                                      // เปิด/ปิด (default true)
 	BankVerifyEnabled   *bool   `json:"bank_verify_enabled"`                          // ตรวจสลิปธนาคาร
 	TruewalletEnabled   *bool   `json:"truewallet_enabled"`                           // ตรวจ TrueMoney
@@ -149,6 +149,18 @@ func (h *Handler) UpsertEasySlipConfig(c *gin.Context) {
 		return
 	}
 
+	// ⭐ ถ้าไม่ส่ง api_key มา → ดึง key เดิมจาก DB (ไม่บังคับกรอกใหม่ทุกครั้ง)
+	if req.APIKey == "" {
+		var savedKey string
+		h.DB.Table("easyslip_configs").Select("api_key").
+			Where("agent_node_id = ?", rootNodeID).Scan(&savedKey)
+		if savedKey == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "กรุณากรอก API Key"})
+			return
+		}
+		req.APIKey = savedKey
+	}
+
 	now := time.Now()
 
 	// Default values สำหรับ boolean pointers
@@ -230,19 +242,32 @@ func (h *Handler) DeleteEasySlipConfig(c *gin.Context) {
 // POST /api/v1/easyslip/test [auth + system.settings]
 //
 // ⭐ ใช้สำหรับ admin ทดสอบว่า API key ใช้ได้หรือไม่ก่อนบันทึก
+// ถ้าไม่ส่ง api_key มา → ดึง key จาก DB (config ที่บันทึกไว้แล้ว)
 func (h *Handler) TestEasySlipConnection(c *gin.Context) {
+	rootNodeID := mw.GetRootNodeID(c)
+
 	var req struct {
-		APIKey string `json:"api_key" binding:"required"`
+		APIKey string `json:"api_key"` // optional — ถ้าว่างจะดึงจาก DB
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "กรุณาระบุ API Key"})
-		return
+	c.ShouldBindJSON(&req)
+
+	// ถ้าไม่ส่ง key มา → ดึงจาก DB
+	apiKey := req.APIKey
+	if apiKey == "" {
+		var savedKey string
+		h.DB.Table("easyslip_configs").Select("api_key").
+			Where("agent_node_id = ?", rootNodeID).Scan(&savedKey)
+		if savedKey == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "กรุณากรอก API Key หรือบันทึก config ก่อน"})
+			return
+		}
+		apiKey = savedKey
 	}
 
 	// เรียก GET /v2/info เพื่อเช็คว่า key ใช้ได้
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	httpReq, _ := http.NewRequest("GET", "https://api.easyslip.com/v2/info", nil)
-	httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
