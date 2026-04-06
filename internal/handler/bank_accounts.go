@@ -18,7 +18,6 @@ import (
 
 type agentBankAccount struct {
 	ID            int64  `json:"id" gorm:"primaryKey"`
-	AgentID       int64  `json:"agent_id"`
 	AgentNodeID   *int64 `json:"agent_node_id" gorm:"index"` // ⭐ NULL=ระบบกลาง (admin), มีค่า=เฉพาะ node
 	BankCode      string `json:"bank_code"`
 	BankName      string `json:"bank_name"`
@@ -44,12 +43,12 @@ func (h *Handler) ListAgentBankAccounts(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var accounts []agentBankAccount
-	query := h.DB.Where("agent_id = ?", 1)
-	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของระบบกลาง
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของ root node
+	query := h.DB.Model(&agentBankAccount{})
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	query.Order("id ASC").Find(&accounts)
 	ok(c, accounts)
@@ -82,8 +81,8 @@ func (h *Handler) CreateAgentBankAccount(c *gin.Context) {
 	now := time.Now().Format("2006-01-02 15:04:05")
 	// ⭐ INSERT พร้อม agent_node_id — admin=NULL, node=nodeID
 	result := h.DB.Exec(`INSERT INTO agent_bank_accounts
-		(agent_id, agent_node_id, bank_code, bank_name, account_number, account_name, account_type, transfer_mode, is_default, status, bank_system, created_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		(agent_node_id, bank_code, bank_name, account_number, account_name, account_type, transfer_mode, is_default, status, bank_system, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
 		scope.SettingNodeID(), req.BankCode, req.BankName, req.AccountNumber, req.AccountName,
 		req.AccountType, req.TransferMode, req.IsDefault, req.BankSystem, now)
 
@@ -108,31 +107,37 @@ func (h *Handler) UpdateAgentBankAccount(c *gin.Context) {
 
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct {
+		BankCode      string `json:"bank_code"`
 		BankName      string `json:"bank_name"`
+		AccountNumber string `json:"account_number"`
 		AccountName   string `json:"account_name"`
 		AccountType   string `json:"account_type"`
 		TransferMode  string `json:"transfer_mode"`
 		IsDefault     *bool  `json:"is_default"`
 		Status        string `json:"status"`
+		BankSystem    string `json:"bank_system"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error()); return
 	}
 
 	updates := map[string]interface{}{}
+	if req.BankCode != "" { updates["bank_code"] = req.BankCode }
 	if req.BankName != "" { updates["bank_name"] = req.BankName }
+	if req.AccountNumber != "" { updates["account_number"] = req.AccountNumber }
 	if req.AccountName != "" { updates["account_name"] = req.AccountName }
 	if req.AccountType != "" { updates["account_type"] = req.AccountType }
 	if req.TransferMode != "" { updates["transfer_mode"] = req.TransferMode }
 	if req.IsDefault != nil { updates["is_default"] = *req.IsDefault }
 	if req.Status != "" { updates["status"] = req.Status }
+	if req.BankSystem != "" { updates["bank_system"] = req.BankSystem }
 
 	if len(updates) == 0 {
 		fail(c, 400, "ไม่มีข้อมูลให้อัพเดท"); return
 	}
 
 	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะบัญชีของตัวเอง
-	query := h.DB.Table("agent_bank_accounts").Where("id = ? AND agent_id = 1", id)
+	query := h.DB.Table("agent_bank_accounts").Where("id = ?", id)
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	}
@@ -151,7 +156,7 @@ func (h *Handler) DeleteAgentBankAccount(c *gin.Context) {
 
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะของตัวเอง
-	query := "DELETE FROM agent_bank_accounts WHERE id = ? AND agent_id = 1"
+	query := "DELETE FROM agent_bank_accounts WHERE id = ?"
 	args := []interface{}{id}
 	if scope.IsNode {
 		query += " AND agent_node_id = ?"
