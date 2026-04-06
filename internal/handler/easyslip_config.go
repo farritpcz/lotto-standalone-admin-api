@@ -25,6 +25,16 @@ import (
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
+// getEasySlipNodeID ดึง rootNodeID สำหรับ EasySlip config
+// ⭐ ใช้ NodeScope แทน GetRootNodeID เพราะ admin JWT ไม่มี node_root_id
+func (h *Handler) getEasySlipNodeID(c *gin.Context) int64 {
+	scope := mw.GetNodeScope(c, h.DB)
+	if scope.IsNode {
+		return scope.NodeID
+	}
+	return scope.RootNodeID
+}
+
 // =============================================================================
 // DTOs — Request/Response สำหรับ EasySlip Config
 // =============================================================================
@@ -85,7 +95,7 @@ type EasySlipVerificationRow struct {
 // GetEasySlipConfig ดึง EasySlip config สำหรับ agent node ปัจจุบัน
 // GET /api/v1/easyslip/config [auth + system.settings]
 func (h *Handler) GetEasySlipConfig(c *gin.Context) {
-	rootNodeID := mw.GetRootNodeID(c)
+	rootNodeID := h.getEasySlipNodeID(c)
 
 	var row struct {
 		ID                 int64   `gorm:"column:id"`
@@ -141,7 +151,7 @@ func (h *Handler) GetEasySlipConfig(c *gin.Context) {
 //
 // ⭐ Upsert: ถ้ามี config อยู่แล้ว → update, ถ้ายังไม่มี → insert
 func (h *Handler) UpsertEasySlipConfig(c *gin.Context) {
-	rootNodeID := mw.GetRootNodeID(c)
+	rootNodeID := h.getEasySlipNodeID(c)
 
 	var req EasySlipConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -224,7 +234,7 @@ func (h *Handler) UpsertEasySlipConfig(c *gin.Context) {
 // DeleteEasySlipConfig ลบ EasySlip config (ปิด EasySlip สำหรับ agent)
 // DELETE /api/v1/easyslip/config [auth + system.settings]
 func (h *Handler) DeleteEasySlipConfig(c *gin.Context) {
-	rootNodeID := mw.GetRootNodeID(c)
+	rootNodeID := h.getEasySlipNodeID(c)
 
 	result := h.DB.Exec("DELETE FROM easyslip_configs WHERE agent_node_id = ?", rootNodeID)
 	if result.RowsAffected == 0 {
@@ -244,7 +254,7 @@ func (h *Handler) DeleteEasySlipConfig(c *gin.Context) {
 // ⭐ ใช้สำหรับ admin ทดสอบว่า API key ใช้ได้หรือไม่ก่อนบันทึก
 // ถ้าไม่ส่ง api_key มา → ดึง key จาก DB (config ที่บันทึกไว้แล้ว)
 func (h *Handler) TestEasySlipConnection(c *gin.Context) {
-	rootNodeID := mw.GetRootNodeID(c)
+	rootNodeID := h.getEasySlipNodeID(c)
 
 	var req struct {
 		APIKey string `json:"api_key"` // optional — ถ้าว่างจะดึงจาก DB
@@ -308,7 +318,7 @@ func (h *Handler) TestEasySlipConnection(c *gin.Context) {
 //   - member_id: filter by member
 //   - date_from, date_to: date range
 func (h *Handler) ListEasySlipVerifications(c *gin.Context) {
-	rootNodeID := mw.GetRootNodeID(c)
+	rootNodeID := h.getEasySlipNodeID(c)
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
@@ -367,7 +377,7 @@ func (h *Handler) ListEasySlipVerifications(c *gin.Context) {
 // GetDepositVerification ดูผล verify ของ deposit request เฉพาะรายการ
 // GET /api/v1/deposits/:id/verification [auth + finance.deposits]
 func (h *Handler) GetDepositVerification(c *gin.Context) {
-	rootNodeID := mw.GetRootNodeID(c)
+	rootNodeID := h.getEasySlipNodeID(c)
 	depositID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var row struct {
