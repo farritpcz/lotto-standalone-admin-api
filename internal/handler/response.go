@@ -1,51 +1,21 @@
-// Package handler — shared response admin handlers.
-// Split from stubs.go on 2026-04-20.
+// Package handler — response helpers (thin wrappers over lotto-core/httpx).
+//
+// Source of truth: github.com/farritpcz/lotto-core/httpx
+// These 1-line wrappers keep call sites short (`ok(c, data)` vs `httpx.OK(c, data)`).
+// If you add a new response helper, add it to lotto-core/httpx first.
 package handler
 
 import (
-	"net/http"
-	"strconv"
-
 	"github.com/gin-gonic/gin"
+
+	"github.com/farritpcz/lotto-core/httpx"
 )
 
-// =============================================================================
-// Helper — JSON response
-// =============================================================================
-
-func ok(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
-}
-func fail(c *gin.Context, status int, msg string) {
-	c.JSON(status, gin.H{"success": false, "error": msg})
-}
+func ok(c *gin.Context, data interface{})         { httpx.OK(c, data) }
+func fail(c *gin.Context, status int, msg string) { httpx.Fail(c, status, msg) }
 func paginated(c *gin.Context, items interface{}, total int64, page, perPage int) {
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data":    gin.H{"items": items, "total": total, "page": page, "per_page": perPage},
-	})
+	httpx.Paginated(c, items, total, page, perPage)
 }
-func pageParams(c *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
-	return page, perPage
-}
-
-// parseFloat parse string → float64 with default value
-func parseFloat(s string, defaultVal float64) float64 {
-	if s == "" {
-		return defaultVal
-	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return defaultVal
-	}
-	return v
-}
-func strPtr(s string) *string { return &s }
+func pageParams(c *gin.Context) (int, int)            { return httpx.PageParams(c) }
+func parseFloat(s string, defaultVal float64) float64 { return httpx.ParseFloat(s, defaultVal) }
+func strPtr(s string) *string                         { return httpx.StrPtr(s) }
