@@ -30,6 +30,7 @@ type agentBankAccount struct {
 	RKAutoUUID    string `json:"rkauto_uuid"`
 	RKAutoStatus  string `json:"rkauto_status"`
 	BankSystem    string `json:"bank_system"`
+	QRCodeURL     string `json:"qr_code_url"` // ⭐ QR ของบัญชีธนาคาร (optional)
 	CreatedAt     string `json:"created_at"`
 }
 
@@ -69,6 +70,7 @@ func (h *Handler) CreateAgentBankAccount(c *gin.Context) {
 		TransferMode  string `json:"transfer_mode"`  // manual | auto
 		IsDefault     bool   `json:"is_default"`
 		BankSystem    string `json:"bank_system"`    // SMS | BANK | KBIZ (auto only)
+		QRCodeURL     string `json:"qr_code_url"`    // ⭐ URL ของ QR code (จาก /upload)
 		RKAutoToken1  string `json:"rkauto_token1"`  // ไม่เก็บ DB
 		RKAutoToken2  string `json:"rkauto_token2"`  // ไม่เก็บ DB
 	}
@@ -80,11 +82,12 @@ func (h *Handler) CreateAgentBankAccount(c *gin.Context) {
 
 	now := time.Now().Format("2006-01-02 15:04:05")
 	// ⭐ INSERT พร้อม agent_node_id — admin=NULL, node=nodeID
+	// ⭐ qr_code_url — optional (frontend อัพรูปผ่าน /upload ก่อนแล้วส่ง URL มา)
 	result := h.DB.Exec(`INSERT INTO agent_bank_accounts
-		(agent_node_id, bank_code, bank_name, account_number, account_name, account_type, transfer_mode, is_default, status, bank_system, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		(agent_node_id, bank_code, bank_name, account_number, account_name, account_type, transfer_mode, is_default, status, bank_system, qr_code_url, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
 		scope.SettingNodeID(), req.BankCode, req.BankName, req.AccountNumber, req.AccountName,
-		req.AccountType, req.TransferMode, req.IsDefault, req.BankSystem, now)
+		req.AccountType, req.TransferMode, req.IsDefault, req.BankSystem, req.QRCodeURL, now)
 
 	if result.Error != nil {
 		fail(c, 500, "ไม่สามารถเพิ่มบัญชีได้"); return
@@ -116,6 +119,7 @@ func (h *Handler) UpdateAgentBankAccount(c *gin.Context) {
 		IsDefault     *bool  `json:"is_default"`
 		Status        string `json:"status"`
 		BankSystem    string `json:"bank_system"`
+		QRCodeURL     *string `json:"qr_code_url"` // ⭐ ใช้ pointer → ส่ง "" ได้ (เพื่อลบ QR)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error()); return
@@ -131,6 +135,7 @@ func (h *Handler) UpdateAgentBankAccount(c *gin.Context) {
 	if req.IsDefault != nil { updates["is_default"] = *req.IsDefault }
 	if req.Status != "" { updates["status"] = req.Status }
 	if req.BankSystem != "" { updates["bank_system"] = req.BankSystem }
+	if req.QRCodeURL != nil { updates["qr_code_url"] = *req.QRCodeURL } // ⭐ รองรับลบ QR (ส่ง "")
 
 	if len(updates) == 0 {
 		fail(c, 400, "ไม่มีข้อมูลให้อัพเดท"); return

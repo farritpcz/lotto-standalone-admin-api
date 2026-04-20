@@ -1,113 +1,126 @@
 // Package handler — upload.go
-// อัพโหลดรูปภาพ → Cloudflare R2 (primary) หรือ local disk (fallback)
+//
+// Upload endpoint สำหรับ admin-api
+//
+// ⚠️ [Security] — admin upload ก็ต้องปลอดภัยเหมือน member:
+//  1. Auth (admin JWT) — ต้องล็อกอินเป็น admin ก่อน
+//  2. Folder whitelist — admin ใช้ได้: lottery, banner, logo, favicon, promo, bank, contact, general
+//  3. Magic bytes validation (ไม่เชื่อ Content-Type)
+//  4. Max size ต่าง folder (banner/promo 2MB, logo 500KB, etc.)
+//  5. Max dimensions (ป้องกัน decompression bomb)
+//  6. Re-encode → strip EXIF + metadata + payload แฝง
+//  7. UUID filename (ไม่เก็บชื่อ user input)
+//
+// ⚠️ [Security] SVG ถูกถอดออก — เสี่ยง stored XSS (SVG รัน JavaScript ได้)
 //
 // POST /api/v1/upload — multipart/form-data
-//
-// ⚠️ SECURITY:
-// - จำกัดขนาด 5MB
-// - รับเฉพาะ jpg, jpeg, png, gif, svg, webp
-// - rename UUID ป้องกัน path traversal
+//   - file:   ไฟล์รูป (required)
+//   - folder: whitelist เท่านั้น
 package handler
 
 import (
-	"fmt"
+	"bytes"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/storage"
 )
 
-const (
-	uploadDir     = "./uploads"
-	maxUploadSize = 5 << 20 // 5MB
-)
-
-var allowedExts = map[string]bool{
-	".jpg": true, ".jpeg": true, ".png": true,
-	".gif": true, ".svg": true, ".webp": true,
+// adminAllowedFolders — folder ที่ admin ใช้ได้ (กว้างกว่า member)
+// ⚠️ [Security] admin ไม่ให้ upload ไป folder "slip" (เฉพาะ member)
+var adminAllowedFolders = map[string]bool{
+	"lottery": true,
+	"banner":  true,
+	"logo":    true,
+	"favicon": true,
+	"promo":   true, // ⭐ โปรโมชั่น
+	"bank":    true, // ⭐ QR + icon บัญชีธนาคาร
+	"contact": true, // ⭐ QR ช่องทางติดต่อ
+	"avatar":  true, // admin avatar
+	"general": true,
 }
 
-// UploadFile อัพโหลดรูปภาพ
-// POST /api/v1/upload
-// Field: file (required), folder (optional: "lottery", "banner", "avatar")
-//
-// ถ้า R2 configured → อัพไป R2 → return R2 public URL
-// ถ้า R2 ไม่มี → เก็บ local → return /uploads/... URL
+// UploadFile — POST /api/v1/upload (admin only)
 func (h *Handler) UploadFile(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
-
-	file, header, err := c.Request.FormFile("file")
-	if err != nil {
-		fail(c, 400, "กรุณาเลือกไฟล์ (max 5MB)")
-		return
-	}
-	defer file.Close()
-
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if !allowedExts[ext] {
-		fail(c, 400, "รองรับเฉพาะ jpg, png, gif, svg, webp")
-		return
-	}
-
-	folder := c.DefaultPostForm("folder", "general")
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
-	// ── ลอง R2 ก่อน ──
-	if r2, ok := h.R2.(*storage.R2Client); ok && r2 != nil && r2.IsConfigured() {
-		publicURL, err := r2.Upload(folder, header.Filename, contentType, file)
-		if err != nil {
-			fail(c, 500, "R2 upload failed: "+err.Error())
-			return
-		}
-
-		ok2(c, gin.H{
-			"url":      publicURL,
-			"storage":  "r2",
-			"filename": filepath.Base(publicURL),
-			"folder":   folder,
-			"size":     header.Size,
-			"type":     contentType,
+	// ⭐ R2 พร้อมใช้?
+	r2, ok := h.R2.(*storage.R2Client)
+	if !ok || r2 == nil || !r2.IsConfigured() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"success": false,
+			"error":   "upload service unavailable (R2 not configured)",
 		})
 		return
 	}
 
-	// ── Fallback: Local disk ──
-	dir := filepath.Join(uploadDir, folder)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		fail(c, 500, "สร้าง directory ไม่สำเร็จ")
+	// =================================================================
+	// [1] Sanitize folder
+	// =================================================================
+	folder := c.PostForm("folder")
+	if folder == "" {
+		folder = c.DefaultPostForm("folder", "general")
+	}
+	folder, err := storage.SanitizeFolder(folder)
+	if err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	// ⚠️ [Security] whitelist admin folders
+	if !adminAllowedFolders[folder] {
+		fail(c, 403, "folder '"+folder+"' not allowed for admin")
 		return
 	}
 
-	newName := fmt.Sprintf("%s_%d%s", uuid.New().String()[:12], time.Now().Unix(), ext)
-	savePath := filepath.Join(dir, newName)
-
-	if err := c.SaveUploadedFile(header, savePath); err != nil {
-		fail(c, 500, "บันทึกไฟล์ไม่สำเร็จ")
+	// =================================================================
+	// [2] รับไฟล์
+	// =================================================================
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		fail(c, 400, "กรุณาเลือกไฟล์")
 		return
 	}
 
-	fileURL := fmt.Sprintf("/uploads/%s/%s", folder, newName)
+	sizeLimit := storage.SizeLimitForFolder(folder)
+	if fileHeader.Size > sizeLimit {
+		fail(c, 413, "ไฟล์ใหญ่เกินไป")
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		fail(c, 500, "ไม่สามารถเปิดไฟล์ได้")
+		return
+	}
+	defer file.Close()
+
+	// =================================================================
+	// [3] Validate + re-encode (magic bytes + strip EXIF + dimensions)
+	// =================================================================
+	safeData, contentType, ext, err := storage.ValidateAndReEncode(file, folder)
+	if err != nil {
+		fail(c, 415, "ไฟล์ไม่ถูกต้อง: "+err.Error())
+		return
+	}
+
+	// =================================================================
+	// [4] Upload ไป R2
+	// =================================================================
+	publicURL, err := r2.Upload(folder, "upload"+ext, contentType, bytes.NewReader(safeData))
+	if err != nil {
+		fail(c, 500, "R2 upload failed: "+err.Error())
+		return
+	}
 
 	ok2(c, gin.H{
-		"url":      fileURL,
-		"storage":  "local",
-		"filename": newName,
-		"folder":   folder,
-		"size":     header.Size,
-		"type":     contentType,
+		"url":     publicURL,
+		"storage": "r2",
+		"folder":  folder,
+		"size":    len(safeData),
+		"type":    contentType,
 	})
 }
 
-// ok2 helper — เหมือน ok แต่ใช้ใน upload (ป้องกัน conflict กับ ok ใน stubs.go)
+// ok2 helper — ส่ง success response (แยกจาก ok ใน stubs.go เพื่อไม่ชนกัน)
 func ok2(c *gin.Context, data interface{}) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
 }

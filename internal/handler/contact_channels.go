@@ -16,13 +16,13 @@ import (
 
 type contactChannel struct {
 	ID          int64  `json:"id" gorm:"primaryKey"`
-	AgentID     int64  `json:"agent_id"`
 	AgentNodeID *int64 `json:"agent_node_id" gorm:"index"` // ⭐ NULL=ระบบกลาง (admin), มีค่า=เฉพาะ node
 	Platform    string `json:"platform"`
 	Name        string `json:"name"`
 	Value       string `json:"value"`
 	LinkURL     string `json:"link_url"`
 	IconURL     string `json:"icon_url"`
+	QRCodeURL   string `json:"qr_code_url"` // ⭐ QR code ของช่องทางติดต่อ (LINE @, WeChat, etc.)
 	SortOrder   int    `json:"sort_order"`
 	IsActive    bool   `json:"is_active"`
 	CreatedAt   string `json:"created_at"`
@@ -38,30 +38,30 @@ func (h *Handler) ListContactChannels(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var channels []contactChannel
-	query := h.DB.Where("agent_id = ?", 1)
-	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของระบบกลาง
+	query := h.DB.Model(&contactChannel{})
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของ root node
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	query.Order("sort_order ASC, id ASC").Find(&channels)
 	ok(c, channels)
 }
 
 // ListPublicContactChannels ดูช่องทางติดต่อ (public — เฉพาะ active)
-// ⭐ Node Scope: node เห็นเฉพาะช่องทางของตัวเอง, admin เห็นของระบบกลาง
+// ⭐ Node Scope: node เห็นเฉพาะช่องทางของตัวเอง, admin เห็นของ root node
 func (h *Handler) ListPublicContactChannels(c *gin.Context) {
 	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var channels []contactChannel
-	query := h.DB.Where("agent_id = ? AND is_active = ?", 1, true)
-	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของระบบกลาง
+	query := h.DB.Where("is_active = ?", true)
+	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของ root node
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	query.Order("sort_order ASC").Find(&channels)
 	ok(c, channels)
@@ -79,6 +79,7 @@ func (h *Handler) CreateContactChannel(c *gin.Context) {
 		Value     string `json:"value" binding:"required"`
 		LinkURL   string `json:"link_url"`
 		IconURL   string `json:"icon_url"`
+		QRCodeURL string `json:"qr_code_url"` // ⭐ QR ของช่องทาง (optional)
 		SortOrder int    `json:"sort_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -87,9 +88,9 @@ func (h *Handler) CreateContactChannel(c *gin.Context) {
 
 	now := time.Now().Format("2006-01-02 15:04:05")
 	// ⭐ INSERT พร้อม agent_node_id — admin=NULL, node=nodeID
-	h.DB.Exec(`INSERT INTO contact_channels (agent_id, agent_node_id, platform, name, value, link_url, icon_url, sort_order, is_active, created_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-		scope.SettingNodeID(), req.Platform, req.Name, req.Value, req.LinkURL, req.IconURL, req.SortOrder, now)
+	h.DB.Exec(`INSERT INTO contact_channels (agent_node_id, platform, name, value, link_url, icon_url, qr_code_url, sort_order, is_active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+		scope.SettingNodeID(), req.Platform, req.Name, req.Value, req.LinkURL, req.IconURL, req.QRCodeURL, req.SortOrder, now)
 
 	ok(c, gin.H{"status": "created", "platform": req.Platform, "name": req.Name})
 }
@@ -105,10 +106,11 @@ func (h *Handler) UpdateContactChannel(c *gin.Context) {
 		Platform  string `json:"platform"`
 		Name      string `json:"name"`
 		Value     string `json:"value"`
-		LinkURL   string `json:"link_url"`
-		IconURL   string `json:"icon_url"`
-		SortOrder *int   `json:"sort_order"`
-		IsActive  *bool  `json:"is_active"`
+		LinkURL   string  `json:"link_url"`
+		IconURL   string  `json:"icon_url"`
+		QRCodeURL *string `json:"qr_code_url"` // ⭐ pointer เพื่อรองรับลบ QR (ส่ง "")
+		SortOrder *int    `json:"sort_order"`
+		IsActive  *bool   `json:"is_active"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error()); return
@@ -120,11 +122,12 @@ func (h *Handler) UpdateContactChannel(c *gin.Context) {
 	if req.Value != "" { updates["value"] = req.Value }
 	if req.LinkURL != "" { updates["link_url"] = req.LinkURL }
 	if req.IconURL != "" { updates["icon_url"] = req.IconURL }
+	if req.QRCodeURL != nil { updates["qr_code_url"] = *req.QRCodeURL } // ⭐ รองรับลบ QR
 	if req.SortOrder != nil { updates["sort_order"] = *req.SortOrder }
 	if req.IsActive != nil { updates["is_active"] = *req.IsActive }
 
 	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะของตัวเอง
-	query := h.DB.Table("contact_channels").Where("id = ? AND agent_id = 1", id)
+	query := h.DB.Table("contact_channels").Where("id = ?", id)
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	}
@@ -143,7 +146,7 @@ func (h *Handler) DeleteContactChannel(c *gin.Context) {
 
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะของตัวเอง
-	query := "DELETE FROM contact_channels WHERE id = ? AND agent_id = 1"
+	query := "DELETE FROM contact_channels WHERE id = ?"
 	args := []interface{}{id}
 	if scope.IsNode {
 		query += " AND agent_node_id = ?"
