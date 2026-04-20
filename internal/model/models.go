@@ -5,16 +5,20 @@
 // TODO: ในอนาคตอาจแยกเป็น shared Go module เฉพาะ models
 package model
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 type Admin struct {
 	ID           int64      `gorm:"primaryKey" json:"id"`
 	Username     string     `gorm:"size:50;uniqueIndex;not null" json:"username"`
 	PasswordHash string     `gorm:"size:255;not null" json:"-"`
 	Name         string     `gorm:"size:100" json:"name"`
-	Role         string     `gorm:"size:20;not null;default:admin" json:"role"`   // owner, admin, operator, viewer
-	AgentNodeID  *int64     `gorm:"index" json:"agent_node_id"`                   // ⭐ NULL=ระบบ, มีค่า=สร้างโดย node นี้
-	Permissions  string     `gorm:"type:text" json:"permissions"`                 // JSON array เช่น ["members.view","deposits.approve"]
+	Role         string     `gorm:"size:20;not null;default:admin" json:"role"` // owner, admin, operator, viewer
+	AgentNodeID  *int64     `gorm:"index" json:"agent_node_id"`                 // ⭐ NULL=ระบบ, มีค่า=สร้างโดย node นี้
+	Permissions  string     `gorm:"type:text" json:"permissions"`               // JSON array เช่น ["members.view","deposits.approve"]
 	Status       string     `gorm:"size:20;not null;default:active" json:"status"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
 	LastLoginIP  string     `gorm:"size:45" json:"last_login_ip"`
@@ -47,15 +51,15 @@ func (AdminLoginHistory) TableName() string { return "admin_login_history" }
 // settings.manage, staff.manage, cms.manage, affiliate.manage
 
 type Member struct {
-	ID           int64     `gorm:"primaryKey" json:"id"`
-	Username     string    `gorm:"size:50;uniqueIndex;not null" json:"username"`
-	PasswordHash string    `gorm:"size:255;not null" json:"-"`
-	Phone        string    `gorm:"size:20" json:"phone"`
-	Email        string    `gorm:"size:100" json:"email"`
-	Balance      float64   `gorm:"type:decimal(15,2);not null;default:0" json:"balance"`
-	Status       string    `gorm:"size:20;not null;default:active" json:"status"`
+	ID           int64   `gorm:"primaryKey" json:"id"`
+	Username     string  `gorm:"size:50;uniqueIndex;not null" json:"username"`
+	PasswordHash string  `gorm:"size:255;not null" json:"-"`
+	Phone        string  `gorm:"size:20" json:"phone"`
+	Email        string  `gorm:"size:100" json:"email"`
+	Balance      float64 `gorm:"type:decimal(15,2);not null;default:0" json:"balance"`
+	Status       string  `gorm:"size:20;not null;default:active" json:"status"`
 	// ReferredBy — ID ของสมาชิกที่แนะนำมา (affiliate referrer)
-	ReferredBy        *int64    `gorm:"index" json:"referred_by,omitempty"`
+	ReferredBy *int64 `gorm:"index" json:"referred_by,omitempty"`
 	// ข้อมูลธนาคาร (กรอกตอนสมัคร)
 	BankCode          string    `gorm:"size:20" json:"bank_code"`
 	BankAccountNumber string    `gorm:"size:20" json:"bank_account_number"`
@@ -99,7 +103,7 @@ type LotteryRound struct {
 	ResultTop3    *string    `gorm:"column:result_top3;size:3" json:"result_top3"`
 	ResultTop2    *string    `gorm:"column:result_top2;size:2" json:"result_top2"`
 	ResultBottom2 *string    `gorm:"column:result_bottom2;size:2" json:"result_bottom2"`
-	ResultFront3  *string    `gorm:"column:result_front3;size:3" json:"result_front3"`   // 3 ตัวหน้า (หวยไทย)
+	ResultFront3  *string    `gorm:"column:result_front3;size:3" json:"result_front3"`     // 3 ตัวหน้า (หวยไทย)
 	ResultBottom3 *string    `gorm:"column:result_bottom3;size:100" json:"result_bottom3"` // 3 ตัวล่าง (comma-separated, หวยไทย)
 	ResultedAt    *time.Time `json:"resulted_at"`
 	RejectReason  string     `gorm:"column:reject_reason;type:text" json:"reject_reason,omitempty"` // เหตุผลยกเลิก (void)
@@ -111,7 +115,7 @@ type LotteryRound struct {
 
 type PayRate struct {
 	ID              int64     `gorm:"primaryKey" json:"id"`
-	AgentNodeID     *int64    `gorm:"index" json:"agent_node_id"`                          // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
+	AgentNodeID     *int64    `gorm:"index" json:"agent_node_id"` // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
 	LotteryTypeID   int64     `gorm:"not null" json:"lottery_type_id"`
 	BetTypeID       int64     `gorm:"not null" json:"bet_type_id"`
 	Rate            float64   `gorm:"type:decimal(10,2);not null" json:"rate"`
@@ -185,16 +189,16 @@ type Setting struct {
 // share DB กับ member-api (#3) — ตาราง affiliate_settings
 // lottery_type_id = nil → default rate ใช้กับทุกประเภทหวย
 type AffiliateSettings struct {
-	ID             int64      `gorm:"primaryKey" json:"id"`
-	AgentID        int64      `gorm:"not null;default:1;index" json:"agent_id"`
-	AgentNodeID    *int64     `gorm:"index" json:"agent_node_id"`                // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
-	LotteryTypeID  *int64     `gorm:"index" json:"lottery_type_id,omitempty"`
-	CommissionRate float64    `gorm:"type:decimal(5,2);not null;default:0" json:"commission_rate"`
-	WithdrawalMin  float64    `gorm:"type:decimal(15,2);not null;default:1" json:"withdrawal_min"`
-	WithdrawalNote string     `gorm:"type:text" json:"withdrawal_note"`
-	Status         string     `gorm:"size:20;not null;default:active" json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             int64        `gorm:"primaryKey" json:"id"`
+	AgentID        int64        `gorm:"not null;default:1;index" json:"agent_id"`
+	AgentNodeID    *int64       `gorm:"index" json:"agent_node_id"` // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
+	LotteryTypeID  *int64       `gorm:"index" json:"lottery_type_id,omitempty"`
+	CommissionRate float64      `gorm:"type:decimal(5,2);not null;default:0" json:"commission_rate"`
+	WithdrawalMin  float64      `gorm:"type:decimal(15,2);not null;default:1" json:"withdrawal_min"`
+	WithdrawalNote string       `gorm:"type:text" json:"withdrawal_note"`
+	Status         string       `gorm:"size:20;not null;default:active" json:"status"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
 	LotteryType    *LotteryType `gorm:"foreignKey:LotteryTypeID" json:"lottery_type,omitempty"`
 }
 
@@ -205,11 +209,11 @@ func (AffiliateSettings) TableName() string { return "affiliate_settings" }
 // share DB กับ member-api (#3) — ตาราง referral_commissions
 type ReferralCommission struct {
 	ID               int64      `gorm:"primaryKey" json:"id"`
-	ReferrerID       int64      `gorm:"not null;index" json:"referrer_id"`        // สมาชิกที่ได้ค่าคอม
-	ReferredID       int64      `gorm:"not null;index" json:"referred_id"`         // สมาชิกที่ถูกแนะนำมา
+	ReferrerID       int64      `gorm:"not null;index" json:"referrer_id"` // สมาชิกที่ได้ค่าคอม
+	ReferredID       int64      `gorm:"not null;index" json:"referred_id"` // สมาชิกที่ถูกแนะนำมา
 	AgentID          int64      `gorm:"not null;default:1" json:"agent_id"`
-	BetID            *int64     `gorm:"index" json:"bet_id"`                      // bet ที่ generate commission นี้
-	RoundID          *int64     `gorm:"index" json:"round_id"`                    // round ที่ settle
+	BetID            *int64     `gorm:"index" json:"bet_id"`   // bet ที่ generate commission นี้
+	RoundID          *int64     `gorm:"index" json:"round_id"` // round ที่ settle
 	BetAmount        float64    `gorm:"type:decimal(15,2);not null" json:"bet_amount"`
 	CommissionRate   float64    `gorm:"type:decimal(5,2);not null" json:"commission_rate"`
 	CommissionAmount float64    `gorm:"type:decimal(15,2);not null" json:"commission_amount"`
@@ -235,8 +239,8 @@ type YeekeeRound struct {
 	EndTime        time.Time `gorm:"not null" json:"end_time"`
 	Status         string    `gorm:"size:20;not null;default:waiting" json:"status"`
 	ResultNumber   string    `gorm:"size:5" json:"result_number"`
-	ServerSeed     string    `gorm:"size:64" json:"-"`          // 🔒 ไม่ส่งให้ client
-	SeedHash       string    `gorm:"size:64" json:"seed_hash"`  // public commitment
+	ServerSeed     string    `gorm:"size:64" json:"-"`         // 🔒 ไม่ส่งให้ client
+	SeedHash       string    `gorm:"size:64" json:"seed_hash"` // public commitment
 	TotalShoots    int       `gorm:"default:0" json:"total_shoots"`
 	TotalSum       int64     `gorm:"default:0" json:"total_sum"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -305,13 +309,13 @@ type ShareTemplate struct {
 	ID          int64     `gorm:"primaryKey" json:"id"`
 	AgentID     int64     `gorm:"not null;index" json:"agent_id"`
 	AgentNodeID *int64    `gorm:"index" json:"agent_node_id"` // ⭐ NULL=ทั้งระบบ, มีค่า=เฉพาะ node
-	Name      string    `gorm:"size:100;not null" json:"name"`
-	Content   string    `gorm:"type:text;not null" json:"content"` // placeholder: {link}, {code}, {username}
-	Platform  string    `gorm:"size:30;not null;default:all" json:"platform"`
-	SortOrder int       `gorm:"not null;default:0" json:"sort_order"`
-	Status    string    `gorm:"size:20;not null;default:active" json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Name        string    `gorm:"size:100;not null" json:"name"`
+	Content     string    `gorm:"type:text;not null" json:"content"` // placeholder: {link}, {code}, {username}
+	Platform    string    `gorm:"size:30;not null;default:all" json:"platform"`
+	SortOrder   int       `gorm:"not null;default:0" json:"sort_order"`
+	Status      string    `gorm:"size:20;not null;default:active" json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (ShareTemplate) TableName() string { return "share_templates" }
@@ -370,6 +374,25 @@ type AgentNode struct {
 
 func (AgentNode) TableName() string { return "agent_nodes" }
 
+// RootNodeID คืน id ของ root node ใน tree นี้ — parse จาก Path (เช่น "/1/5/12/" → 1)
+// AIDEV-NOTE: ใช้ใน JWT token claim เพื่อ scope ข้อมูล (node → เห็นเฉพาะ tree ตัวเอง)
+// ถ้า Path ไม่มี segment (root ตัวเอง) → return n.ID
+func (n AgentNode) RootNodeID() int64 {
+	p := strings.Trim(n.Path, "/")
+	if p == "" {
+		return n.ID
+	}
+	// ตัด segment แรก
+	first := p
+	if i := strings.Index(p, "/"); i > 0 {
+		first = p[:i]
+	}
+	if root, err := strconv.ParseInt(first, 10, 64); err == nil && root > 0 {
+		return root
+	}
+	return n.ID
+}
+
 // AgentNodeCommissionSetting — ตั้ง % แยกตามประเภทหวย (override)
 // table: agent_node_commission_settings
 type AgentNodeCommissionSetting struct {
@@ -386,20 +409,20 @@ func (AgentNodeCommissionSetting) TableName() string { return "agent_node_commis
 // AgentProfitTransaction — บันทึกกำไร/ขาดทุนของ 1 node จาก 1 bet
 // table: agent_profit_transactions
 type AgentProfitTransaction struct {
-	ID           int64     `json:"id" gorm:"primaryKey"`
-	AgentID      int64     `json:"agent_id" gorm:"not null"`
-	RoundID      int64     `json:"round_id" gorm:"not null;index"`
-	BetID        int64     `json:"bet_id" gorm:"not null"`
-	AgentNodeID  int64     `json:"agent_node_id" gorm:"not null;index"`
-	FromNodeID   *int64    `json:"from_node_id"`
-	MemberID     int64     `json:"member_id" gorm:"not null;index"`
-	BetAmount    float64   `json:"bet_amount" gorm:"type:decimal(12,2);not null"`
-	NetResult    float64   `json:"net_result" gorm:"type:decimal(12,2);not null"`
-	MyPercent    float64   `json:"my_percent" gorm:"type:decimal(5,2);not null"`
-	ChildPercent float64   `json:"child_percent" gorm:"type:decimal(5,2);not null"`
-	DiffPercent  float64   `json:"diff_percent" gorm:"type:decimal(5,2);not null"`
-	ProfitAmount float64   `json:"profit_amount" gorm:"type:decimal(12,2);not null"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           int64      `json:"id" gorm:"primaryKey"`
+	AgentID      int64      `json:"agent_id" gorm:"not null"`
+	RoundID      int64      `json:"round_id" gorm:"not null;index"`
+	BetID        int64      `json:"bet_id" gorm:"not null"`
+	AgentNodeID  int64      `json:"agent_node_id" gorm:"not null;index"`
+	FromNodeID   *int64     `json:"from_node_id"`
+	MemberID     int64      `json:"member_id" gorm:"not null;index"`
+	BetAmount    float64    `json:"bet_amount" gorm:"type:decimal(12,2);not null"`
+	NetResult    float64    `json:"net_result" gorm:"type:decimal(12,2);not null"`
+	MyPercent    float64    `json:"my_percent" gorm:"type:decimal(5,2);not null"`
+	ChildPercent float64    `json:"child_percent" gorm:"type:decimal(5,2);not null"`
+	DiffPercent  float64    `json:"diff_percent" gorm:"type:decimal(5,2);not null"`
+	ProfitAmount float64    `json:"profit_amount" gorm:"type:decimal(12,2);not null"`
+	CreatedAt    time.Time  `json:"created_at"`
 	AgentNode    *AgentNode `json:"agent_node,omitempty" gorm:"foreignKey:AgentNodeID"`
 }
 
@@ -432,10 +455,10 @@ func NextRole(parentRole string) string {
 type AdminActionLog struct {
 	ID         int64     `gorm:"primaryKey" json:"id"`
 	AdminID    int64     `gorm:"not null;index" json:"admin_id"`
-	Action     string    `gorm:"size:100;not null;index" json:"action"`    // เช่น yeekee_manual_settle
-	TargetType string    `gorm:"size:50" json:"target_type"`               // เช่น yeekee_round
+	Action     string    `gorm:"size:100;not null;index" json:"action"` // เช่น yeekee_manual_settle
+	TargetType string    `gorm:"size:50" json:"target_type"`            // เช่น yeekee_round
 	TargetID   int64     `json:"target_id"`
-	Details    string    `gorm:"type:json" json:"details"`                 // JSON รายละเอียด
+	Details    string    `gorm:"type:json" json:"details"` // JSON รายละเอียด
 	IP         string    `gorm:"size:45" json:"ip"`
 	CreatedAt  time.Time `json:"created_at"`
 }

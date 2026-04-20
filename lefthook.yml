@@ -1,0 +1,36 @@
+# Lefthook pre-commit config — admin-api (Go)
+# Rules from: C:/project/lotto-system/docs/coding_standards.md
+# Install once: lefthook install
+# Requires: go, goimports (go install golang.org/x/tools/cmd/goimports@latest)
+#           golangci-lint (https://golangci-lint.run/welcome/install/)
+
+pre-commit:
+  parallel: true
+  commands:
+
+    gofmt:
+      glob: "*.go"
+      run: gofmt -w {staged_files}
+      stage_fixed: true
+
+    goimports:
+      glob: "*.go"
+      run: sh scripts/hooks/goimports.sh {staged_files}
+      stage_fixed: true
+
+    govet:
+      glob: "*.go"
+      run: sh scripts/hooks/govet.sh {staged_files}
+
+    golangci-lint:
+      glob: "*.go"
+      run: sh scripts/hooks/golangci.sh
+
+    no-debug-leftovers:
+      glob: "*.go"
+      run: sh scripts/hooks/no-debug.sh {staged_files}
+
+commit-msg:
+  commands:
+    todo-format:
+      run: sh scripts/hooks/todo-format.sh {1}

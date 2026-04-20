@@ -27,10 +27,11 @@ import (
 // NodeScope เก็บข้อมูล scope สำหรับ node user
 // ใช้กำหนดว่า handler ควรเห็นข้อมูลอะไรบ้าง
 type NodeScope struct {
-	IsNode    bool    // true = login จาก agent_nodes (เว็บสายงาน)
-	NodeID    int64   // agent_nodes.id ของ node ที่ login
-	NodeIDs   []int64 // ตัวเอง + descendants ทั้งหมด (สำหรับ filter agent_node_id)
-	MemberIDs []int64 // members.id ที่อยู่ใต้ nodeIDs เหล่านี้ (สำหรับ filter member_id)
+	IsNode     bool    // true = login จาก agent_nodes (เว็บสายงาน)
+	NodeID     int64   // agent_nodes.id ของ node ที่ login
+	RootNodeID int64   // ⭐ root agent_node_id ของทรีนี้ (ใช้ scope ข้อมูลที่ผูกกับ agent_node_id สำหรับ admin)
+	NodeIDs    []int64 // ตัวเอง + descendants ทั้งหมด (สำหรับ filter agent_node_id)
+	MemberIDs  []int64 // members.id ที่อยู่ใต้ nodeIDs เหล่านี้ (สำหรับ filter member_id)
 }
 
 // GetNodeScope ดึง scope จาก context + คำนวณ NodeIDs/MemberIDs
@@ -48,9 +49,27 @@ func GetNodeScope(c *gin.Context, db *gorm.DB) *NodeScope {
 	role, _ := c.Get("admin_role")
 	roleStr, _ := role.(string)
 
-	// Admin → ไม่ scope
+	// Admin → ไม่ scope members/bets
+	// แต่ยังต้องหา RootNodeID เพื่อ scope ข้อมูลที่ผูกกับ agent_node_id (levels, rates, settings ฯลฯ)
 	if roleStr != "node" {
 		scope := &NodeScope{IsNode: false}
+		// AIDEV-NOTE: admin อาจผูกกับ agent_node_id ได้ (admins.agent_node_id NOT NULL)
+		// ถ้าไม่ผูก → ใช้ root node ตัวแรก (parent_id IS NULL, เรียง id ASC)
+		adminID := GetAdminID(c)
+		var row struct {
+			AgentNodeID *int64 `gorm:"column:agent_node_id"`
+		}
+		db.Raw("SELECT agent_node_id FROM admins WHERE id = ? LIMIT 1", adminID).Scan(&row)
+		if row.AgentNodeID != nil && *row.AgentNodeID > 0 {
+			scope.RootNodeID = *row.AgentNodeID
+		} else {
+			var rootID int64
+			db.Raw("SELECT id FROM agent_nodes WHERE parent_id IS NULL ORDER BY id ASC LIMIT 1").Scan(&rootID)
+			if rootID == 0 {
+				rootID = 1 // fallback — DB seeding convention
+			}
+			scope.RootNodeID = rootID
+		}
 		c.Set("_node_scope", scope)
 		return scope
 	}
@@ -79,11 +98,22 @@ func GetNodeScope(c *gin.Context, db *gorm.DB) *NodeScope {
 	var memberIDs []int64
 	db.Table("members").Where("agent_node_id IN ?", nodeIDs).Pluck("id", &memberIDs)
 
+	// หา root node ของทรีนี้: parent_id IS NULL ใน agent_id เดียวกัน
+	// (เพื่อ sync logic กับ admin — ข้อมูลผูก agent_node_id ไปที่ root เสมอ)
+	var rootID int64
+	db.Raw(`SELECT root.id FROM agent_nodes me
+	        JOIN agent_nodes root ON root.agent_id = me.agent_id AND root.parent_id IS NULL
+	        WHERE me.id = ? LIMIT 1`, nodeID).Scan(&rootID)
+	if rootID == 0 {
+		rootID = nodeID // fallback
+	}
+
 	scope := &NodeScope{
-		IsNode:    true,
-		NodeID:    nodeID,
-		NodeIDs:   nodeIDs,
-		MemberIDs: memberIDs,
+		IsNode:     true,
+		NodeID:     nodeID,
+		RootNodeID: rootID,
+		NodeIDs:    nodeIDs,
+		MemberIDs:  memberIDs,
 	}
 	c.Set("_node_scope", scope)
 	return scope

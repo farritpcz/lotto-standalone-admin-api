@@ -1,0 +1,22 @@
+# Environment variables (มี API keys, secrets, tokens)
+.env
+.env.*
+.env.local
+.env.production
+
+# Binary
+lotto-standalone-admin-api
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
