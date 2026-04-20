@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 // migrate_uploads_to_r2.go — ย้ายรูปเก่าจาก local /uploads → R2
 //
 // Usage:

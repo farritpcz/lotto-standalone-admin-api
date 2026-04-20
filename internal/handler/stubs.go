@@ -30,8 +30,8 @@ import (
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 	"github.com/farritpcz/lotto-standalone-admin-api/internal/model"
-	"github.com/farritpcz/lotto-standalone-admin-api/internal/service"
 	rkautoLib "github.com/farritpcz/lotto-standalone-admin-api/internal/rkauto"
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/service"
 )
 
 // =============================================================================
@@ -53,16 +53,24 @@ func paginated(c *gin.Context, items interface{}, total int64, page, perPage int
 func pageParams(c *gin.Context) (int, int) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 { page = 1 }
-	if perPage < 1 || perPage > 100 { perPage = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 20
+	}
 	return page, perPage
 }
 
 // parseFloat parse string → float64 with default value
 func parseFloat(s string, defaultVal float64) float64 {
-	if s == "" { return defaultVal }
+	if s == "" {
+		return defaultVal
+	}
 	v, err := strconv.ParseFloat(s, 64)
-	if err != nil { return defaultVal }
+	if err != nil {
+		return defaultVal
+	}
 	return v
 }
 
@@ -76,7 +84,8 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		Password string `json:"password" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	// ⭐ ลอง admin ก่อน → ถ้าไม่เจอ → ลอง agent_nodes (สายงาน)
@@ -84,10 +93,12 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 	if err := h.DB.Where("username = ?", req.Username).First(&admin).Error; err == nil {
 		// === พบใน admins table ===
 		if bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)) != nil {
-			fail(c, 401, "invalid credentials"); return
+			fail(c, 401, "invalid credentials")
+			return
 		}
 		if admin.Status != "active" {
-			fail(c, 403, "account suspended"); return
+			fail(c, 403, "account suspended")
+			return
 		}
 
 		now := time.Now()
@@ -107,7 +118,8 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 			// ใช้ role="node" เพื่อให้ NodeScope ทำงาน แต่เก็บ role จริงไว้ใน context ด้วย
 			token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, "node", h.AdminJWTSecret, h.AdminJWTExpiryHours)
 			if err != nil {
-				fail(c, 500, "failed to generate token"); return
+				fail(c, 500, "failed to generate token")
+				return
 			}
 			middleware.SetAdminTokenCookie(c, token, h.AdminJWTExpiryHours*3600, h.cookieConfig())
 			middleware.SetCSRFCookie(c, h.cookieConfig())
@@ -121,7 +133,8 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		// ⭐ admin ระดับระบบ (ไม่มี agent_node_id) → login ปกติ
 		token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, admin.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
 		if err != nil {
-			fail(c, 500, "failed to generate token"); return
+			fail(c, 500, "failed to generate token")
+			return
 		}
 
 		middleware.SetAdminTokenCookie(c, token, h.AdminJWTExpiryHours*3600, h.cookieConfig())
@@ -133,13 +146,16 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 	// === ไม่เจอใน admins → ลอง agent_nodes (สายงาน) ===
 	var node model.AgentNode
 	if err := h.DB.Where("username = ?", req.Username).First(&node).Error; err != nil {
-		fail(c, 401, "invalid credentials"); return
+		fail(c, 401, "invalid credentials")
+		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(node.PasswordHash), []byte(req.Password)) != nil {
-		fail(c, 401, "invalid credentials"); return
+		fail(c, 401, "invalid credentials")
+		return
 	}
 	if node.Status != "active" {
-		fail(c, 403, "บัญชีถูกระงับ — กรุณาติดต่อหัวสาย"); return
+		fail(c, 403, "บัญชีถูกระงับ — กรุณาติดต่อหัวสาย")
+		return
 	}
 
 	// สร้าง node_token + admin_token (role="node") เพื่อเข้า admin panel ได้
@@ -156,11 +172,11 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 			"id": node.ID, "username": node.Username, "name": node.Name,
 			"role": "node", "permissions": "", "status": node.Status,
 		},
-		"token":        adminToken,
-		"permissions":  "",
-		"user_type":    "node",
-		"node_id":      node.ID,
-		"node_role":    node.Role,
+		"token":         adminToken,
+		"permissions":   "",
+		"user_type":     "node",
+		"node_id":       node.ID,
+		"node_role":     node.Role,
 		"share_percent": node.SharePercent,
 	})
 }
@@ -296,15 +312,17 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 	}
 
 	// ⭐ helper: สร้าง WHERE clause สำหรับ member scope (ใช้ใน raw SQL)
-	memberFilter := ""         // สำหรับ transactions (member_id)
-	betMemberFilter := ""      // สำหรับ bets (b.member_id)
-	memberModelFilter := ""    // สำหรับ members model (agent_node_id)
-	depositMemberFilter := ""  // สำหรับ deposit_requests (member_id)
+	memberFilter := ""        // สำหรับ transactions (member_id)
+	betMemberFilter := ""     // สำหรับ bets (b.member_id)
+	memberModelFilter := ""   // สำหรับ members model (agent_node_id)
+	depositMemberFilter := "" // สำหรับ deposit_requests (member_id)
 	if scope.IsNode {
 		mIDs := scope.MemberIDsForSQL()
 		idStr := ""
 		for i, id := range mIDs {
-			if i > 0 { idStr += "," }
+			if i > 0 {
+				idStr += ","
+			}
 			idStr += strconv.FormatInt(id, 10)
 		}
 		memberFilter = " AND member_id IN (" + idStr + ")"
@@ -312,7 +330,9 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 		memberModelFilter = " AND agent_node_id IN (" + func() string {
 			s := ""
 			for i, id := range scope.NodeIDs {
-				if i > 0 { s += "," }
+				if i > 0 {
+					s += ","
+				}
 				s += strconv.FormatInt(id, 10)
 			}
 			return s
@@ -382,9 +402,9 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 
 	// ═══ 4. Top 10 สมาชิกยอดฝาก/ถอนสูงสุด ═══
 	type TopDepositor struct {
-		MemberID     int64   `json:"member_id"`
-		Username     string  `json:"username"`
-		TotalDeposit float64 `json:"total_deposit"`
+		MemberID      int64   `json:"member_id"`
+		Username      string  `json:"username"`
+		TotalDeposit  float64 `json:"total_deposit"`
 		TotalWithdraw float64 `json:"total_withdraw"`
 	}
 	var topDepositors []TopDepositor
@@ -410,11 +430,11 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 	var recentDeposits, recentWithdrawals []RecentTx
 	h.DB.Raw(`SELECT d.id, d.member_id, m.username, d.amount, d.status, '' as bank_code, d.created_at
 		FROM deposit_requests d LEFT JOIN members m ON m.id = d.member_id
-		WHERE 1=1`+depositMemberFilter+`
+		WHERE 1=1` + depositMemberFilter + `
 		ORDER BY d.created_at DESC LIMIT 5`).Scan(&recentDeposits)
 	h.DB.Raw(`SELECT w.id, w.member_id, m.username, w.amount, w.status, w.bank_code, w.created_at
 		FROM withdraw_requests w LEFT JOIN members m ON m.id = w.member_id
-		WHERE 1=1`+depositMemberFilter+`
+		WHERE 1=1` + depositMemberFilter + `
 		ORDER BY w.created_at DESC LIMIT 5`).Scan(&recentWithdrawals)
 
 	// ═══ 6. ติดตามสมาชิกรายวัน ═══
@@ -430,11 +450,11 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 
 	// ═══ 7. Credit Stats ═══
 	type CreditStats struct {
-		CreditAdded      float64 `json:"credit_added"`
-		CreditDeducted   float64 `json:"credit_deducted"`
-		DepositCount     int64   `json:"deposit_count"`
-		CommissionTotal  float64 `json:"commission_total"`
-		CancelledDeposit float64 `json:"cancelled_deposits"`
+		CreditAdded       float64 `json:"credit_added"`
+		CreditDeducted    float64 `json:"credit_deducted"`
+		DepositCount      int64   `json:"deposit_count"`
+		CommissionTotal   float64 `json:"commission_total"`
+		CancelledDeposit  float64 `json:"cancelled_deposits"`
 		CancelledWithdraw float64 `json:"cancelled_withdrawals"`
 	}
 	var credits CreditStats
@@ -447,27 +467,27 @@ func (h *Handler) GetDashboardV2(c *gin.Context) {
 
 	// ═══ 8. บัญชีธนาคาร ═══
 	type BankAccount struct {
-		ID         int64  `json:"id"`
-		BankCode   string `json:"bank_code"`
-		BankName   string `json:"bank_name"`
-		AccountNo  string `json:"account_number"`
-		AccountName string `json:"account_name"`
-		Balance    float64 `json:"balance"`
+		ID          int64   `json:"id"`
+		BankCode    string  `json:"bank_code"`
+		BankName    string  `json:"bank_name"`
+		AccountNo   string  `json:"account_number"`
+		AccountName string  `json:"account_name"`
+		Balance     float64 `json:"balance"`
 	}
 	var bankAccounts []BankAccount
 	h.DB.Table("agent_bank_accounts").Scan(&bankAccounts)
 
 	// ═══ Build response ═══
 	resp := gin.H{
-		"summary":              summary,
-		"chart_data":           chartData,
-		"top_bettors":          topBettors,
-		"top_depositors":       topDepositors,
-		"recent_deposits":      recentDeposits,
-		"recent_withdrawals":   recentWithdrawals,
-		"member_tracking":      tracking,
-		"credit_stats":         credits,
-		"bank_accounts":        bankAccounts,
+		"summary":            summary,
+		"chart_data":         chartData,
+		"top_bettors":        topBettors,
+		"top_depositors":     topDepositors,
+		"recent_deposits":    recentDeposits,
+		"recent_withdrawals": recentWithdrawals,
+		"member_tracking":    tracking,
+		"credit_stats":       credits,
+		"bank_accounts":      bankAccounts,
 	}
 
 	// Cache 60s (เฉพาะ admin)
@@ -490,8 +510,12 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	var total int64
 	query := h.DB.Model(&model.Member{})
 	query = scope.ScopeByNodeID(query, "agent_node_id") // ⭐ node เห็นเฉพาะ members ในสาย
-	if s := c.Query("status"); s != "" { query = query.Where("status = ?", s) }
-	if q := c.Query("q"); q != "" { query = query.Where("username LIKE ? OR phone LIKE ?", "%"+q+"%", "%"+q+"%") }
+	if s := c.Query("status"); s != "" {
+		query = query.Where("status = ?", s)
+	}
+	if q := c.Query("q"); q != "" {
+		query = query.Where("username LIKE ? OR phone LIKE ?", "%"+q+"%", "%"+q+"%")
+	}
 	query.Count(&total)
 	query.Order("created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&members)
 	paginated(c, members, total, page, perPage)
@@ -501,9 +525,15 @@ func (h *Handler) GetMember(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope ตามสายงาน
 	var member model.Member
-	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
+	if err := h.DB.First(&member, id).Error; err != nil {
+		fail(c, 404, "member not found")
+		return
+	}
 	// ⭐ เช็คว่า member อยู่ในสายของ node user
-	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์เข้าถึงสมาชิกนี้"); return }
+	if !scope.HasMember(id) {
+		fail(c, 403, "ไม่มีสิทธิ์เข้าถึงสมาชิกนี้")
+		return
+	}
 
 	// ── Aggregated data: ยอดแทง/ชนะ/ฝาก/ถอน + referrer username ──
 	type AggBet struct {
@@ -568,17 +598,30 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var member model.Member
-	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
-	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
+	if err := h.DB.First(&member, id).Error; err != nil {
+		fail(c, 404, "member not found")
+		return
+	}
+	if !scope.HasMember(id) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
 	var req struct {
 		Phone       string `json:"phone"`
 		Email       string `json:"email"`
 		Password    string `json:"password"`      // ⭐ admin reset password
-		AgentNodeID *int64 `json:"agent_node_id"`  // ⭐ ย้ายสมาชิกไป node อื่น
+		AgentNodeID *int64 `json:"agent_node_id"` // ⭐ ย้ายสมาชิกไป node อื่น
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
-	if req.Phone != "" { member.Phone = req.Phone }
-	if req.Email != "" { member.Email = req.Email }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	if req.Phone != "" {
+		member.Phone = req.Phone
+	}
+	if req.Email != "" {
+		member.Email = req.Email
+	}
 	// ⭐ ย้ายสมาชิกไป node อื่น
 	if req.AgentNodeID != nil {
 		member.AgentNodeID = req.AgentNodeID
@@ -586,11 +629,13 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	// ⭐ รีเซ็ตรหัสผ่าน (ถ้าส่งมา)
 	if req.Password != "" {
 		if len(req.Password) < 6 {
-			fail(c, 400, "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"); return
+			fail(c, 400, "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร")
+			return
 		}
 		hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
-			fail(c, 500, "failed to hash password"); return
+			fail(c, 500, "failed to hash password")
+			return
 		}
 		member.PasswordHash = string(hashed)
 	}
@@ -609,15 +654,25 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 		Amount float64 `json:"amount" binding:"required"`
 		Note   string  `json:"note"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	var member model.Member
-	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
-	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
+	if err := h.DB.First(&member, id).Error; err != nil {
+		fail(c, 404, "member not found")
+		return
+	}
+	if !scope.HasMember(id) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
 
 	// เช็คว่าหักแล้วไม่ติดลบ
 	if req.Amount < 0 && member.Balance+req.Amount < 0 {
-		fail(c, 400, "ยอดเงินไม่เพียงพอ"); return
+		fail(c, 400, "ยอดเงินไม่เพียงพอ")
+		return
 	}
 
 	tx := h.DB.Begin()
@@ -628,7 +683,9 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 
 	// สร้าง transaction record
 	txType := "admin_credit"
-	if req.Amount < 0 { txType = "admin_debit" }
+	if req.Amount < 0 {
+		txType = "admin_debit"
+	}
 	tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
 		VALUES (1, ?, ?, ?, ?, ?, 'admin_adjust', ?, ?)`,
 		id, txType, req.Amount, member.Balance, member.Balance+req.Amount, req.Note, now)
@@ -640,9 +697,17 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 func (h *Handler) UpdateMemberStatus(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
-	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
-	var req struct { Status string `json:"status" binding:"required"` }
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if !scope.HasMember(id) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
+	var req struct {
+		Status string `json:"status" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	h.DB.Model(&model.Member{}).Where("id = ?", id).Update("status", req.Status)
 	ok(c, gin.H{"id": id, "status": req.Status})
 }
@@ -695,8 +760,14 @@ func (h *Handler) ListLotteries(c *gin.Context) {
 
 func (h *Handler) CreateLottery(c *gin.Context) {
 	var lt model.LotteryType
-	if err := c.ShouldBindJSON(&lt); err != nil { fail(c, 400, err.Error()); return }
-	if err := h.DB.Create(&lt).Error; err != nil { fail(c, 500, "failed to create"); return }
+	if err := c.ShouldBindJSON(&lt); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	if err := h.DB.Create(&lt).Error; err != nil {
+		fail(c, 500, "failed to create")
+		return
+	}
 	ok(c, lt)
 }
 
@@ -754,7 +825,8 @@ func (h *Handler) UpdateLotteryImage(c *gin.Context) {
 		ImageURL string `json:"image_url" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 	h.DB.Model(&model.LotteryType{}).Where("id = ?", id).Update("image_url", req.ImageURL)
 	ok(c, gin.H{"id": id, "image_url": req.ImageURL})
@@ -771,8 +843,12 @@ func (h *Handler) ListRounds(c *gin.Context) {
 	var rounds []model.LotteryRound
 	var total int64
 	query := h.DB.Model(&model.LotteryRound{}).Preload("LotteryType")
-	if s := c.Query("status"); s != "" { query = query.Where("status = ?", s) }
-	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
+	if s := c.Query("status"); s != "" {
+		query = query.Where("status = ?", s)
+	}
+	if lt := c.Query("lottery_type_id"); lt != "" {
+		query = query.Where("lottery_type_id = ?", lt)
+	}
 	query.Count(&total)
 	query.Order("round_date DESC, close_time DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&rounds)
 	paginated(c, rounds, total, page, perPage)
@@ -780,16 +856,27 @@ func (h *Handler) ListRounds(c *gin.Context) {
 
 func (h *Handler) CreateRound(c *gin.Context) {
 	var round model.LotteryRound
-	if err := c.ShouldBindJSON(&round); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&round); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	round.Status = "upcoming"
-	if err := h.DB.Create(&round).Error; err != nil { fail(c, 500, "failed to create round"); return }
+	if err := h.DB.Create(&round).Error; err != nil {
+		fail(c, 500, "failed to create round")
+		return
+	}
 	ok(c, round)
 }
 
 func (h *Handler) UpdateRoundStatus(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var req struct { Status string `json:"status" binding:"required"` }
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	var req struct {
+		Status string `json:"status" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	h.DB.Model(&model.LotteryRound{}).Where("id = ?", id).Update("status", req.Status)
 	ok(c, gin.H{"id": id, "status": req.Status})
 }
@@ -804,9 +891,13 @@ func (h *Handler) UpdateRoundStatus(c *gin.Context) {
 func (h *Handler) ManualOpenRound(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	svc := h.getRoundService()
-	if svc == nil { fail(c, 500, "round service not configured"); return }
+	if svc == nil {
+		fail(c, 500, "round service not configured")
+		return
+	}
 	if err := svc.OpenRound(id); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 	ok(c, gin.H{"id": id, "status": "open", "message": "เปิดรับแทงสำเร็จ"})
 }
@@ -817,9 +908,13 @@ func (h *Handler) ManualOpenRound(c *gin.Context) {
 func (h *Handler) ManualCloseRound(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	svc := h.getRoundService()
-	if svc == nil { fail(c, 500, "round service not configured"); return }
+	if svc == nil {
+		fail(c, 500, "round service not configured")
+		return
+	}
 	if err := svc.CloseRound(id); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 	ok(c, gin.H{"id": id, "status": "closed", "message": "ปิดรับแทงสำเร็จ"})
 }
@@ -835,13 +930,19 @@ func (h *Handler) VoidRound(c *gin.Context) {
 		Reason string `json:"reason"`
 	}
 	c.ShouldBindJSON(&req)
-	if req.Reason == "" { req.Reason = "ยกเลิกโดยแอดมิน" }
+	if req.Reason == "" {
+		req.Reason = "ยกเลิกโดยแอดมิน"
+	}
 
 	svc := h.getRoundService()
-	if svc == nil { fail(c, 500, "round service not configured"); return }
+	if svc == nil {
+		fail(c, 500, "round service not configured")
+		return
+	}
 	result, err := svc.VoidRound(id, req.Reason, adminID)
 	if err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 	ok(c, result)
 }
@@ -854,9 +955,13 @@ func (h *Handler) ListSchedules(c *gin.Context) {
 
 // getRoundService ดึง RoundService จาก Handler (type assertion)
 func (h *Handler) getRoundService() *service.RoundService {
-	if h.RoundService == nil { return nil }
+	if h.RoundService == nil {
+		return nil
+	}
 	svc, ok := h.RoundService.(*service.RoundService)
-	if !ok { return nil }
+	if !ok {
+		return nil
+	}
 	return svc
 }
 
@@ -877,11 +982,17 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 		Front3  string `json:"front3"`  // 3 ตัวหน้า (optional)
 		Bottom3 string `json:"bottom3"` // 3 ตัวล่าง (optional, comma-separated)
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	// ดึง round
 	var round model.LotteryRound
-	if err := h.DB.First(&round, roundID).Error; err != nil { fail(c, 404, "round not found"); return }
+	if err := h.DB.First(&round, roundID).Error; err != nil {
+		fail(c, 404, "round not found")
+		return
+	}
 
 	// ดึง bets ทั้งหมดของรอบ (pending หรือ won/lost ถ้าออกผลไปแล้ว)
 	var bets []model.Bet
@@ -916,7 +1027,10 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 		totalAmount += bet.Amount
 		betTypeCode := ""
 		betTypeName := ""
-		if bet.BetType != nil { betTypeCode = bet.BetType.Code; betTypeName = bet.BetType.Name }
+		if bet.BetType != nil {
+			betTypeCode = bet.BetType.Code
+			betTypeName = bet.BetType.Name
+		}
 
 		isWin := false
 		switch betTypeCode {
@@ -934,11 +1048,14 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 		case "3BOTTOM":
 			if req.Bottom3 != "" {
 				for _, b3 := range strings.Split(req.Bottom3, ",") {
-					if strings.TrimSpace(b3) == bet.Number { isWin = true; break }
+					if strings.TrimSpace(b3) == bet.Number {
+						isWin = true
+						break
+					}
 				}
 			}
 		case "4TOP":
-			isWin = req.Front3 != "" && len(req.Front3) >= 1 && len(req.Top3) >= 3 && bet.Number == (req.Front3[len(req.Front3)-1:]+req.Top3)[:4]
+			isWin = req.Front3 != "" && len(req.Front3) >= 1 && len(req.Top3) >= 3 && bet.Number == (req.Front3[len(req.Front3)-1:] + req.Top3)[:4]
 		case "4TOD":
 			if req.Front3 != "" && len(req.Top3) >= 3 {
 				full4 := (req.Front3[len(req.Front3)-1:] + req.Top3)[:4]
@@ -953,7 +1070,9 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 		if isWin {
 			payout := bet.Amount * bet.Rate
 			username := ""
-			if bet.Member != nil { username = bet.Member.Username }
+			if bet.Member != nil {
+				username = bet.Member.Username
+			}
 			winners = append(winners, WinnerInfo{
 				BetID: bet.ID, MemberID: bet.MemberID, Username: username,
 				Number: bet.Number, BetType: betTypeName,
@@ -968,7 +1087,7 @@ func (h *Handler) PreviewResult(c *gin.Context) {
 		"round_number": round.RoundNumber,
 		"result":       gin.H{"top3": req.Top3, "top2": req.Top2, "bottom2": req.Bottom2, "front3": req.Front3, "bottom3": req.Bottom3},
 		"total_bets":   totalBets,
-		"total_amount":  totalAmount,
+		"total_amount": totalAmount,
 		"winners":      winners,
 		"winner_count": len(winners),
 		"total_payout": totalPayout,
@@ -981,7 +1100,9 @@ func sortString(s string) string {
 	r := []byte(s)
 	for i := 0; i < len(r); i++ {
 		for j := i + 1; j < len(r); j++ {
-			if r[i] > r[j] { r[i], r[j] = r[j], r[i] }
+			if r[i] > r[j] {
+				r[i], r[j] = r[j], r[i]
+			}
 		}
 	}
 	return string(r)
@@ -990,7 +1111,9 @@ func sortString(s string) string {
 // helper: check if number contains digit
 func containsDigit(result string, digit string) bool {
 	for _, c := range result {
-		if string(c) == digit { return true }
+		if string(c) == digit {
+			return true
+		}
 	}
 	return false
 }
@@ -1006,19 +1129,21 @@ func containsDigit(result string, digit string) bool {
 //  4. อัพเดท bets: won/lost + win_amount
 //  5. จ่ายเงินคนชนะ: members.balance += win_amount
 //  6. สร้าง transactions สำหรับคนชนะ
+//
 // SubmitResult กรอกผลรางวัล + settle bets ทั้งรอบ
 //
 // Flow:
-//   1. รับผลจาก admin (top3, top2, bottom2, front3?, bottom3?)
-//   2. บันทึกผลลง lottery_rounds
-//   3. ดึง bets ทั้งหมดของรอบ (status=pending) + preload BetType
-//   4. แปลง DB bets → lotto-core types.Bet
-//   5. เรียก lotto-core payout.SettleRound() → ได้ผลทุก bet (won/lost + winAmount)
-//   6. อัพเดท bets ใน DB + จ่ายเงินคนชนะ (atomic per member)
-//   7. คำนวณ commission ให้ referrers (goroutine)
+//  1. รับผลจาก admin (top3, top2, bottom2, front3?, bottom3?)
+//  2. บันทึกผลลง lottery_rounds
+//  3. ดึง bets ทั้งหมดของรอบ (status=pending) + preload BetType
+//  4. แปลง DB bets → lotto-core types.Bet
+//  5. เรียก lotto-core payout.SettleRound() → ได้ผลทุก bet (won/lost + winAmount)
+//  6. อัพเดท bets ใน DB + จ่ายเงินคนชนะ (atomic per member)
+//  7. คำนวณ commission ให้ referrers (goroutine)
 //
 // ⭐ ใช้ lotto-core payout เต็ม — รองรับ 3TOP, 3TOD, 3FRONT, 3BOTTOM,
-//    4TOP, 4TOD, 2TOP, 2BOTTOM, RUN_TOP, RUN_BOT
+//
+//	4TOP, 4TOD, 2TOP, 2BOTTOM, RUN_TOP, RUN_BOT
 func (h *Handler) SubmitResult(c *gin.Context) {
 	roundID, _ := strconv.ParseInt(c.Param("roundId"), 10, 64)
 
@@ -1026,23 +1151,26 @@ func (h *Handler) SubmitResult(c *gin.Context) {
 	// top3, top2, bottom2 บังคับกรอก
 	// front3, bottom3 optional (ใช้กับหวยไทยที่มี 3 ตัวหน้า / 3 ตัวล่าง)
 	var req struct {
-		Top3    string `json:"top3" binding:"required"`     // 3 ตัวบน เช่น "847"
-		Top2    string `json:"top2" binding:"required"`     // 2 ตัวบน เช่น "47"
-		Bottom2 string `json:"bottom2" binding:"required"`  // 2 ตัวล่าง เช่น "56"
-		Front3  string `json:"front3"`                      // 3 ตัวหน้า เช่น "491" (optional)
-		Bottom3 string `json:"bottom3"`                     // 3 ตัวล่าง เช่น "123,456" (optional, comma-separated)
+		Top3    string `json:"top3" binding:"required"`    // 3 ตัวบน เช่น "847"
+		Top2    string `json:"top2" binding:"required"`    // 2 ตัวบน เช่น "47"
+		Bottom2 string `json:"bottom2" binding:"required"` // 2 ตัวล่าง เช่น "56"
+		Front3  string `json:"front3"`                     // 3 ตัวหน้า เช่น "491" (optional)
+		Bottom3 string `json:"bottom3"`                    // 3 ตัวล่าง เช่น "123,456" (optional, comma-separated)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	// ─── Step 2: ดึง round → เช็คว่ายังไม่มีผล ────────────────
 	var round model.LotteryRound
 	if err := h.DB.First(&round, roundID).Error; err != nil {
-		fail(c, 404, "round not found"); return
+		fail(c, 404, "round not found")
+		return
 	}
 	if round.Status == "resulted" {
-		fail(c, 400, "round already has result"); return
+		fail(c, 400, "round already has result")
+		return
 	}
 
 	// ─── Step 3: บันทึกผลลง DB ────────────────────────────────
@@ -1183,7 +1311,9 @@ func (h *Handler) ListResults(c *gin.Context) {
 	var rounds []model.LotteryRound
 	var total int64
 	query := h.DB.Model(&model.LotteryRound{}).Where("status = ?", "resulted").Preload("LotteryType")
-	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
+	if lt := c.Query("lottery_type_id"); lt != "" {
+		query = query.Where("lottery_type_id = ?", lt)
+	}
 	query.Count(&total)
 	query.Order("resulted_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&rounds)
 	paginated(c, rounds, total, page, perPage)
@@ -1203,7 +1333,9 @@ func (h *Handler) ListBans(c *gin.Context) {
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	}
-	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
+	if lt := c.Query("lottery_type_id"); lt != "" {
+		query = query.Where("lottery_type_id = ?", lt)
+	}
 	query.Count(&total)
 	query.Order("created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&bans)
 	paginated(c, bans, total, page, perPage)
@@ -1212,14 +1344,17 @@ func (h *Handler) ListBans(c *gin.Context) {
 func (h *Handler) CreateBan(c *gin.Context) {
 	// ⭐ รับทั้ง bet_type_id (int) หรือ bet_type_id (string code เช่น "3TOP")
 	var req struct {
-		LotteryTypeID  int64   `json:"lottery_type_id" binding:"required"`
-		BetTypeID      interface{} `json:"bet_type_id"` // int หรือ string code
-		Number         string  `json:"number" binding:"required"`
-		BanType        string  `json:"ban_type"`
-		ReducedRate    float64 `json:"reduced_rate"`
-		MaxAmount      float64 `json:"max_amount"`
+		LotteryTypeID int64       `json:"lottery_type_id" binding:"required"`
+		BetTypeID     interface{} `json:"bet_type_id"` // int หรือ string code
+		Number        string      `json:"number" binding:"required"`
+		BanType       string      `json:"ban_type"`
+		ReducedRate   float64     `json:"reduced_rate"`
+		MaxAmount     float64     `json:"max_amount"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	// Resolve bet_type_id — ถ้าเป็น string code ให้หา ID จาก DB
 	var betTypeID int64
@@ -1230,10 +1365,12 @@ func (h *Handler) CreateBan(c *gin.Context) {
 		// หา bet_type ID จาก code เช่น "3TOP" → id
 		h.DB.Table("bet_types").Select("id").Where("code = ?", v).Scan(&betTypeID)
 		if betTypeID == 0 {
-			fail(c, 400, "ไม่พบประเภทเดิมพัน: "+v); return
+			fail(c, 400, "ไม่พบประเภทเดิมพัน: "+v)
+			return
 		}
 	default:
-		fail(c, 400, "bet_type_id ต้องเป็นตัวเลขหรือ code"); return
+		fail(c, 400, "bet_type_id ต้องเป็นตัวเลขหรือ code")
+		return
 	}
 
 	// ⭐ node user: ตั้ง agent_node_id ให้เลขอั้นเป็นของ node ตัวเอง
@@ -1255,8 +1392,13 @@ func (h *Handler) CreateBan(c *gin.Context) {
 		Status:        "active",
 		CreatedAt:     time.Now(),
 	}
-	if ban.BanType == "" { ban.BanType = "full_ban" }
-	if err := h.DB.Create(&ban).Error; err != nil { fail(c, 500, "failed to create ban"); return }
+	if ban.BanType == "" {
+		ban.BanType = "full_ban"
+	}
+	if err := h.DB.Create(&ban).Error; err != nil {
+		fail(c, 500, "failed to create ban")
+		return
+	}
 	ok(c, ban)
 }
 
@@ -1267,8 +1409,16 @@ func (h *Handler) DeleteBan(c *gin.Context) {
 	if scope.IsNode {
 		var ban model.NumberBan
 		h.DB.First(&ban, id)
-		if ban.AgentNodeID == nil || !func() bool { for _, nid := range scope.NodeIDs { if nid == *ban.AgentNodeID { return true } }; return false }() {
-			fail(c, 403, "ไม่สามารถลบเลขอั้นของระบบได้"); return
+		if ban.AgentNodeID == nil || !func() bool {
+			for _, nid := range scope.NodeIDs {
+				if nid == *ban.AgentNodeID {
+					return true
+				}
+			}
+			return false
+		}() {
+			fail(c, 403, "ไม่สามารถลบเลขอั้นของระบบได้")
+			return
 		}
 	}
 	h.DB.Model(&model.NumberBan{}).Where("id = ?", id).Update("status", "inactive")
@@ -1298,7 +1448,9 @@ func (h *Handler) ListRates(c *gin.Context) {
 	query := h.DB.Preload("BetType").Preload("LotteryType").
 		Where("status = ?", "active").
 		Where("agent_node_id IS NULL OR agent_node_id = ?", nodeID)
-	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
+	if lt := c.Query("lottery_type_id"); lt != "" {
+		query = query.Where("lottery_type_id = ?", lt)
+	}
 	query.Find(&rates)
 
 	// ⭐ Merge: ถ้ามี override (agent_node_id != nil) ใช้แทน default
@@ -1339,10 +1491,17 @@ func (h *Handler) UpdateRate(c *gin.Context) {
 		Rate            *float64 `json:"rate"`
 		MaxBetPerNumber *float64 `json:"max_bet_per_number"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	updates := map[string]interface{}{}
-	if req.Rate != nil { updates["rate"] = *req.Rate }
-	if req.MaxBetPerNumber != nil { updates["max_bet_per_number"] = *req.MaxBetPerNumber }
+	if req.Rate != nil {
+		updates["rate"] = *req.Rate
+	}
+	if req.MaxBetPerNumber != nil {
+		updates["max_bet_per_number"] = *req.MaxBetPerNumber
+	}
 	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะ rates ของตัวเอง
 	query := h.DB.Model(&model.PayRate{}).Where("id = ?", id)
 	if scope.IsNode {
@@ -1474,7 +1633,8 @@ func (h *Handler) GetBillDetail(c *gin.Context) {
 	batchID := c.Param("batchId")
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	if batchID == "" {
-		fail(c, 400, "invalid batch_id"); return
+		fail(c, 400, "invalid batch_id")
+		return
 	}
 
 	query := h.DB.Model(&model.Bet{}).
@@ -1485,7 +1645,8 @@ func (h *Handler) GetBillDetail(c *gin.Context) {
 	query.Order("id ASC").Find(&bets)
 
 	if len(bets) == 0 {
-		fail(c, 404, "ไม่พบบิล"); return
+		fail(c, 404, "ไม่พบบิล")
+		return
 	}
 
 	// สรุปยอดรวม
@@ -1517,7 +1678,8 @@ func (h *Handler) CancelBill(c *gin.Context) {
 		Reason string `json:"reason"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	// ดึงทุก bet ในบิลที่ยังไม่ถูกยกเลิก
@@ -1526,7 +1688,8 @@ func (h *Handler) CancelBill(c *gin.Context) {
 	query = scope.ScopeByMemberID(query, "member_id") // ⭐
 	query.Find(&bets)
 	if len(bets) == 0 {
-		fail(c, 400, "ไม่มีรายการที่สามารถยกเลิกได้"); return
+		fail(c, 400, "ไม่มีรายการที่สามารถยกเลิกได้")
+		return
 	}
 
 	tx := h.DB.Begin()
@@ -1563,7 +1726,8 @@ func (h *Handler) CancelBill(c *gin.Context) {
 			debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", totalDebit, memberID, totalDebit)
 			if debitResult.RowsAffected == 0 {
 				tx.Rollback()
-				fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักรางวัลคืน"); return
+				fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักรางวัลคืน")
+				return
 			}
 			var bal float64
 			tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&bal)
@@ -1612,17 +1776,23 @@ func (h *Handler) CancelBet(c *gin.Context) {
 		Reason string `json:"reason"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	// ดึงข้อมูล bet
 	var bet model.Bet
 	if err := h.DB.First(&bet, id).Error; err != nil {
-		fail(c, 404, "ไม่พบรายการเดิมพัน"); return
+		fail(c, 404, "ไม่พบรายการเดิมพัน")
+		return
 	}
-	if !scope.HasMember(bet.MemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐ scope
+	if !scope.HasMember(bet.MemberID) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐ scope
 	if bet.Status == "cancelled" {
-		fail(c, 400, "รายการนี้ถูกยกเลิกไปแล้ว"); return
+		fail(c, 400, "รายการนี้ถูกยกเลิกไปแล้ว")
+		return
 	}
 
 	tx := h.DB.Begin()
@@ -1659,7 +1829,8 @@ func (h *Handler) CancelBet(c *gin.Context) {
 			debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", debitAmount, bet.MemberID, debitAmount)
 			if debitResult.RowsAffected == 0 {
 				tx.Rollback()
-				fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืนรางวัล"); return
+				fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืนรางวัล")
+				return
 			}
 
 			var balAfterDebit float64
@@ -1705,8 +1876,12 @@ func (h *Handler) ListAllTransactions(c *gin.Context) {
 	var total int64
 	query := h.DB.Model(&model.Transaction{})
 	query = scope.ScopeByMemberID(query, "member_id") // ⭐ node เห็นเฉพาะ transactions ของ members ในสาย
-	if t := c.Query("type"); t != "" { query = query.Where("type = ?", t) }
-	if m := c.Query("member_id"); m != "" { query = query.Where("member_id = ?", m) }
+	if t := c.Query("type"); t != "" {
+		query = query.Where("type = ?", t)
+	}
+	if m := c.Query("member_id"); m != "" {
+		query = query.Where("member_id = ?", m)
+	}
 	query.Count(&total)
 	query.Order("created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&txns)
 	paginated(c, txns, total, page, perPage)
@@ -1719,10 +1894,10 @@ func (h *Handler) ListAllTransactions(c *gin.Context) {
 func (h *Handler) GetSummaryReport(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var result struct {
-		TotalBets    int64   `json:"total_bets"`
-		TotalAmount  float64 `json:"total_amount"`
-		TotalWin     float64 `json:"total_win"`
-		Profit       float64 `json:"profit"`
+		TotalBets   int64   `json:"total_bets"`
+		TotalAmount float64 `json:"total_amount"`
+		TotalWin    float64 `json:"total_win"`
+		Profit      float64 `json:"profit"`
 	}
 	dateFrom := c.DefaultQuery("from", time.Now().AddDate(0, 0, -7).Format("2006-01-02"))
 	dateTo := c.DefaultQuery("to", time.Now().Format("2006-01-02"))
@@ -1800,7 +1975,8 @@ func (h *Handler) GetAgentTheme(c *gin.Context) {
 	var theme ThemeRow
 	// ⭐ ดึง theme จาก root node (agent_nodes) แทน agents table เดิม
 	if err := h.DB.Table("agent_nodes").Where("role = 'admin' AND parent_id IS NULL").First(&theme).Error; err != nil {
-		fail(c, 404, "agent not found"); return
+		fail(c, 404, "agent not found")
+		return
 	}
 	ok(c, theme)
 }
@@ -1810,7 +1986,8 @@ func (h *Handler) UpdateAgentTheme(c *gin.Context) {
 	// ในอนาคตจะรองรับ per-node theme override
 	scope := mw.GetNodeScope(c, h.DB)
 	if scope.IsNode {
-		fail(c, 403, "node ไม่สามารถแก้ไข theme ของระบบได้"); return
+		fail(c, 403, "node ไม่สามารถแก้ไข theme ของระบบได้")
+		return
 	}
 
 	var req struct {
@@ -1824,21 +2001,39 @@ func (h *Handler) UpdateAgentTheme(c *gin.Context) {
 		HeaderBG       *string `json:"theme_header_bg"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	updates := map[string]interface{}{}
-	if req.PrimaryColor != nil   { updates["theme_primary_color"] = *req.PrimaryColor }
-	if req.SecondaryColor != nil { updates["theme_secondary_color"] = *req.SecondaryColor }
-	if req.BGColor != nil        { updates["theme_bg_color"] = *req.BGColor }
-	if req.AccentColor != nil    { updates["theme_accent_color"] = *req.AccentColor }
-	if req.CardGradient1 != nil  { updates["theme_card_gradient1"] = *req.CardGradient1 }
-	if req.CardGradient2 != nil  { updates["theme_card_gradient2"] = *req.CardGradient2 }
-	if req.NavBG != nil          { updates["theme_nav_bg"] = *req.NavBG }
-	if req.HeaderBG != nil       { updates["theme_header_bg"] = *req.HeaderBG }
+	if req.PrimaryColor != nil {
+		updates["theme_primary_color"] = *req.PrimaryColor
+	}
+	if req.SecondaryColor != nil {
+		updates["theme_secondary_color"] = *req.SecondaryColor
+	}
+	if req.BGColor != nil {
+		updates["theme_bg_color"] = *req.BGColor
+	}
+	if req.AccentColor != nil {
+		updates["theme_accent_color"] = *req.AccentColor
+	}
+	if req.CardGradient1 != nil {
+		updates["theme_card_gradient1"] = *req.CardGradient1
+	}
+	if req.CardGradient2 != nil {
+		updates["theme_card_gradient2"] = *req.CardGradient2
+	}
+	if req.NavBG != nil {
+		updates["theme_nav_bg"] = *req.NavBG
+	}
+	if req.HeaderBG != nil {
+		updates["theme_header_bg"] = *req.HeaderBG
+	}
 
 	if len(updates) == 0 {
-		fail(c, 400, "no fields to update"); return
+		fail(c, 400, "no fields to update")
+		return
 	}
 
 	// ⭐ Bump theme_version → หน้าบ้านเห็น version ไม่ตรง → refetch สีใหม่
@@ -1846,7 +2041,8 @@ func (h *Handler) UpdateAgentTheme(c *gin.Context) {
 	if err := h.DB.Table("agent_nodes").Where("role = 'admin' AND parent_id IS NULL").
 		Updates(updates).
 		Update("theme_version", gorm.Expr("theme_version + 1")).Error; err != nil {
-		fail(c, 500, err.Error()); return
+		fail(c, 500, err.Error())
+		return
 	}
 
 	ok(c, gin.H{"message": "theme updated", "fields_updated": len(updates)})
@@ -1874,7 +2070,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var req map[string]string
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	for key, value := range req {
 		// ⭐ ถ้าเป็น node → บังคับ prefix key เพื่อไม่ให้แก้ settings ระบบ
 		actualKey := key
@@ -1930,12 +2129,15 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var req struct {
-		LotteryTypeID  *int64  `json:"lottery_type_id"`  // nil = default
+		LotteryTypeID  *int64  `json:"lottery_type_id"` // nil = default
 		CommissionRate float64 `json:"commission_rate" binding:"required,min=0,max=100"`
 		WithdrawalMin  float64 `json:"withdrawal_min"`
 		WithdrawalNote string  `json:"withdrawal_note"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	// ⭐ Upsert: หาทุก status (รวม inactive) — ป้องกัน duplicate
 	// scope ตามสายงาน: node หา/สร้างเฉพาะ settings ของตัวเอง
@@ -1961,7 +2163,10 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 			WithdrawalNote: req.WithdrawalNote,
 			Status:         "active",
 		}
-		if err := h.DB.Create(&setting).Error; err != nil { fail(c, 500, "failed to create"); return }
+		if err := h.DB.Create(&setting).Error; err != nil {
+			fail(c, 500, "failed to create")
+			return
+		}
 		ok(c, setting)
 		return
 	}
@@ -1990,7 +2195,8 @@ func (h *Handler) DeleteAffiliateSetting(c *gin.Context) {
 	}
 	result := query.Update("status", "inactive")
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบ setting นี้หรือไม่มีสิทธิ์ลบ"); return
+		fail(c, 404, "ไม่พบ setting นี้หรือไม่มีสิทธิ์ลบ")
+		return
 	}
 	ok(c, gin.H{"id": id, "status": "inactive"})
 }
@@ -1999,11 +2205,11 @@ func (h *Handler) DeleteAffiliateSetting(c *gin.Context) {
 func (h *Handler) GetAffiliateReport(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	type CommSummary struct {
-		MemberID         int64   `json:"member_id"`
-		Username         string  `json:"username"`
-		TotalReferred    int64   `json:"total_referred"`
-		TotalCommission  float64 `json:"total_commission"`
-		PendingComm      float64 `json:"pending_commission"`
+		MemberID        int64   `json:"member_id"`
+		Username        string  `json:"username"`
+		TotalReferred   int64   `json:"total_referred"`
+		TotalCommission float64 `json:"total_commission"`
+		PendingComm     float64 `json:"pending_commission"`
 	}
 	var report []CommSummary
 	query := h.DB.Table("referral_commissions rc").
@@ -2051,20 +2257,26 @@ func (h *Handler) CreateShareTemplate(c *gin.Context) {
 		Platform  string `json:"platform"`
 		SortOrder int    `json:"sort_order"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	if req.Platform == "" {
 		req.Platform = "all"
 	}
 
 	tmpl := model.ShareTemplate{
-		Name:        req.Name,
-		Content:     req.Content,
-		Platform:    req.Platform,
-		SortOrder:   req.SortOrder,
-		Status:      "active",
+		Name:      req.Name,
+		Content:   req.Content,
+		Platform:  req.Platform,
+		SortOrder: req.SortOrder,
+		Status:    "active",
 	}
-	if err := h.DB.Create(&tmpl).Error; err != nil { fail(c, 500, "สร้าง template ไม่สำเร็จ"); return }
+	if err := h.DB.Create(&tmpl).Error; err != nil {
+		fail(c, 500, "สร้าง template ไม่สำเร็จ")
+		return
+	}
 	ok(c, tmpl)
 }
 
@@ -2083,7 +2295,10 @@ func (h *Handler) UpdateShareTemplate(c *gin.Context) {
 		SortOrder *int    `json:"sort_order"`
 		Status    *string `json:"status"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	// ⭐ scope ตามสายงาน: node ต้องเป็นเจ้าของ template ถึงจะแก้ได้
 	var tmpl model.ShareTemplate
@@ -2091,14 +2306,27 @@ func (h *Handler) UpdateShareTemplate(c *gin.Context) {
 	if scope.IsNode {
 		findQuery = findQuery.Where("agent_node_id = ?", scope.NodeID)
 	}
-	if err := findQuery.First(&tmpl).Error; err != nil { fail(c, 404, "ไม่พบ template หรือไม่มีสิทธิ์แก้ไข"); return }
+	if err := findQuery.First(&tmpl).Error; err != nil {
+		fail(c, 404, "ไม่พบ template หรือไม่มีสิทธิ์แก้ไข")
+		return
+	}
 
 	updates := make(map[string]interface{})
-	if req.Name != nil { updates["name"] = *req.Name }
-	if req.Content != nil { updates["content"] = *req.Content }
-	if req.Platform != nil { updates["platform"] = *req.Platform }
-	if req.SortOrder != nil { updates["sort_order"] = *req.SortOrder }
-	if req.Status != nil { updates["status"] = *req.Status }
+	if req.Name != nil {
+		updates["name"] = *req.Name
+	}
+	if req.Content != nil {
+		updates["content"] = *req.Content
+	}
+	if req.Platform != nil {
+		updates["platform"] = *req.Platform
+	}
+	if req.SortOrder != nil {
+		updates["sort_order"] = *req.SortOrder
+	}
+	if req.Status != nil {
+		updates["status"] = *req.Status
+	}
 
 	h.DB.Model(&tmpl).Updates(updates)
 	h.DB.First(&tmpl, id)
@@ -2119,7 +2347,8 @@ func (h *Handler) DeleteShareTemplate(c *gin.Context) {
 	}
 	result := query.Update("status", "inactive")
 	if result.RowsAffected == 0 {
-		fail(c, 404, "ไม่พบ template หรือไม่มีสิทธิ์ลบ"); return
+		fail(c, 404, "ไม่พบ template หรือไม่มีสิทธิ์ลบ")
+		return
 	}
 	ok(c, gin.H{"id": id, "status": "deleted"})
 }
@@ -2150,12 +2379,14 @@ func (h *Handler) ListCommissionAdjustments(c *gin.Context) {
 	query.Order("created_at DESC").Offset((page - 1) * perPage).Limit(perPage).Find(&items)
 
 	totalPages := int(total) / perPage
-	if int(total)%perPage > 0 { totalPages++ }
+	if int(total)%perPage > 0 {
+		totalPages++
+	}
 
 	c.JSON(200, gin.H{
 		"success": true,
-		"data": items,
-		"meta": gin.H{"page": page, "per_page": perPage, "total": total, "total_pages": totalPages},
+		"data":    items,
+		"meta":    gin.H{"page": page, "per_page": perPage, "total": total, "total_pages": totalPages},
 	})
 }
 
@@ -2168,7 +2399,18 @@ func (h *Handler) ListCommissionAdjustments(c *gin.Context) {
 //   - deduct: หักค่าคอม pending (ลดจาก wallet balance)
 //   - cancel: ยกเลิก commission เฉพาะรายการ (เปลี่ยน status เป็น cancelled)
 func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
-	adminID := int64(1) // TODO: ดึงจาก JWT เมื่อมี admin auth
+	// AIDEV-NOTE: admin_id จาก JWT (รองรับทั้ง int64 และ float64 จาก jwt lib)
+	adminIDAny, _ := c.Get("admin_id")
+	adminID, _ := adminIDAny.(int64)
+	if adminID == 0 {
+		if f, ok := adminIDAny.(float64); ok {
+			adminID = int64(f)
+		}
+	}
+	if adminID == 0 {
+		fail(c, 401, "unauthenticated")
+		return
+	}
 
 	var req struct {
 		MemberID     int64   `json:"member_id" binding:"required"`
@@ -2177,12 +2419,16 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 		Reason       string  `json:"reason" binding:"required,min=3"`
 		CommissionID *int64  `json:"commission_id"` // สำหรับ cancel เฉพาะรายการ
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	// ดึงข้อมูลสมาชิก
 	var member model.Member
 	if err := h.DB.First(&member, req.MemberID).Error; err != nil {
-		fail(c, 404, "ไม่พบสมาชิก"); return
+		fail(c, 404, "ไม่พบสมาชิก")
+		return
 	}
 
 	balanceBefore := member.Balance
@@ -2202,7 +2448,9 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 			Status:           "pending",
 		}
 		if err := tx.Create(&comm).Error; err != nil {
-			tx.Rollback(); fail(c, 500, "สร้างค่าคอมไม่สำเร็จ"); return
+			tx.Rollback()
+			fail(c, 500, "สร้างค่าคอมไม่สำเร็จ")
+			return
 		}
 		// ไม่เพิ่ม balance ทันที — ให้สมาชิกถอนเอง (เหมือน commission ปกติ)
 
@@ -2215,7 +2463,9 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 
 		remaining := req.Amount
 		for _, pc := range pendingComms {
-			if remaining <= 0 { break }
+			if remaining <= 0 {
+				break
+			}
 			if pc.CommissionAmount <= remaining {
 				tx.Model(&pc).Update("status", "cancelled")
 				remaining -= pc.CommissionAmount
@@ -2229,13 +2479,17 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 	case "cancel":
 		// ยกเลิก commission เฉพาะรายการ
 		if req.CommissionID == nil {
-			tx.Rollback(); fail(c, 400, "กรุณาระบุ commission_id สำหรับการยกเลิก"); return
+			tx.Rollback()
+			fail(c, 400, "กรุณาระบุ commission_id สำหรับการยกเลิก")
+			return
 		}
 		result := tx.Model(&model.ReferralCommission{}).
 			Where("id = ? AND referrer_id = ? AND status = ?", *req.CommissionID, req.MemberID, "pending").
 			Update("status", "cancelled")
 		if result.RowsAffected == 0 {
-			tx.Rollback(); fail(c, 404, "ไม่พบรายการค่าคอมที่ต้องการยกเลิก หรือยกเลิกไปแล้ว"); return
+			tx.Rollback()
+			fail(c, 404, "ไม่พบรายการค่าคอมที่ต้องการยกเลิก หรือยกเลิกไปแล้ว")
+			return
 		}
 	}
 
@@ -2320,12 +2574,17 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 	var reqStatus string
 	row := h.DB.Table("deposit_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
 	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
-		fail(c, 404, "ไม่พบคำขอ"); return
+		fail(c, 404, "ไม่พบคำขอ")
+		return
 	}
 	if reqStatus != "pending" {
-		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")")
+		return
 	}
-	if !scope.HasMember(memberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐ scope
+	if !scope.HasMember(memberID) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐ scope
 
 	tx := h.DB.Begin()
 
@@ -2412,7 +2671,10 @@ func (h *Handler) RejectDeposit(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var depMemberID int64
 	h.DB.Table("deposit_requests").Select("member_id").Where("id = ?", id).Row().Scan(&depMemberID)
-	if !scope.HasMember(depMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
+	if !scope.HasMember(depMemberID) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
 
 	var req struct {
 		Reason string `json:"reason"`
@@ -2428,7 +2690,8 @@ func (h *Handler) RejectDeposit(c *gin.Context) {
 		now, req.Reason, adminID, id,
 	)
 	if result.RowsAffected == 0 {
-		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ"); return
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ")
+		return
 	}
 
 	ok(c, gin.H{"id": id, "status": "rejected", "reason": req.Reason})
@@ -2447,7 +2710,10 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var cdMemberID int64
 	h.DB.Table("deposit_requests").Select("member_id").Where("id = ?", id).Row().Scan(&cdMemberID)
-	if !scope.HasMember(cdMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
+	if !scope.HasMember(cdMemberID) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
 
 	var req struct {
 		Reason string `json:"reason"`
@@ -2469,10 +2735,12 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 	var reqStatus string
 	row := h.DB.Table("deposit_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
 	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
-		fail(c, 404, "ไม่พบคำขอ"); return
+		fail(c, 404, "ไม่พบคำขอ")
+		return
 	}
 	if reqStatus != "approved" {
-		fail(c, 400, "ยกเลิกได้เฉพาะคำขอที่อนุมัติแล้ว (สถานะปัจจุบัน: "+reqStatus+")"); return
+		fail(c, 400, "ยกเลิกได้เฉพาะคำขอที่อนุมัติแล้ว (สถานะปัจจุบัน: "+reqStatus+")")
+		return
 	}
 
 	tx := h.DB.Begin()
@@ -2487,7 +2755,8 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 		debitResult := tx.Exec("UPDATE members SET balance = balance - ? WHERE id = ? AND balance >= ?", amount, memberID, amount)
 		if debitResult.RowsAffected == 0 {
 			tx.Rollback()
-			fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืน"); return
+			fail(c, 400, "สมาชิกมียอดเงินไม่เพียงพอสำหรับหักคืน")
+			return
 		}
 
 		// ดึง balance ล่าสุด
@@ -2578,7 +2847,10 @@ func (h *Handler) ApproveWithdraw(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var awMemberID int64
 	h.DB.Table("withdraw_requests").Select("member_id").Where("id = ?", id).Row().Scan(&awMemberID)
-	if !scope.HasMember(awMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
+	if !scope.HasMember(awMemberID) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
 
 	var req struct {
 		Mode string `json:"mode"` // "auto" = โอนอัตโนมัติ, "manual" = โอนเอง
@@ -2593,10 +2865,12 @@ func (h *Handler) ApproveWithdraw(c *gin.Context) {
 	var reqStatus string
 	row := h.DB.Table("withdraw_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
 	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
-		fail(c, 404, "ไม่พบคำขอ"); return
+		fail(c, 404, "ไม่พบคำขอ")
+		return
 	}
 	if reqStatus != "pending" {
-		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")")
+		return
 	}
 
 	now := time.Now()
@@ -2664,7 +2938,10 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var rwMemberID int64
 	h.DB.Table("withdraw_requests").Select("member_id").Where("id = ?", id).Row().Scan(&rwMemberID)
-	if !scope.HasMember(rwMemberID) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
+	if !scope.HasMember(rwMemberID) {
+		fail(c, 403, "ไม่มีสิทธิ์")
+		return
+	} // ⭐
 
 	var req struct {
 		Refund *bool  `json:"refund"` // default true — คืนเงิน
@@ -2685,10 +2962,12 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 	var reqStatus string
 	row := h.DB.Table("withdraw_requests").Select("amount, member_id, status").Where("id = ?", id).Row()
 	if err := row.Scan(&amount, &memberID, &reqStatus); err != nil {
-		fail(c, 404, "ไม่พบคำขอ"); return
+		fail(c, 404, "ไม่พบคำขอ")
+		return
 	}
 	if reqStatus != "pending" {
-		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")"); return
+		fail(c, 400, "คำขอนี้ไม่ใช่สถานะรอดำเนินการ (สถานะ: "+reqStatus+")")
+		return
 	}
 
 	tx := h.DB.Begin()
@@ -2761,10 +3040,13 @@ func (h *Handler) CreateAutoBanRule(c *gin.Context) {
 	rule.CreatedAt = time.Now()
 	rule.UpdatedAt = time.Now()
 	// ⭐ node user: ตั้ง agent_node_id ให้กฎเป็นของ node ตัวเอง
+	// AIDEV-NOTE: AutoBanRule.AgentNodeID is *int64 (NULL = ระบบ)
 	if scope.IsNode {
-		rule.AgentNodeID = scope.NodeID
-	} else if rule.AgentNodeID == 0 {
-		rule.AgentNodeID = 1 // default root node
+		nid := scope.NodeID
+		rule.AgentNodeID = &nid
+	} else if rule.AgentNodeID == nil || *rule.AgentNodeID == 0 {
+		one := int64(1) // default root node
+		rule.AgentNodeID = &one
 	}
 	if err := h.DB.Create(&rule).Error; err != nil {
 		fail(c, 500, "failed to create auto-ban rule")
@@ -2779,7 +3061,7 @@ func (h *Handler) CreateAutoBanRule(c *gin.Context) {
 func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB) // ⭐ scope
 	var req struct {
-		LotteryTypeID int64 `json:"lottery_type_id" binding:"required"`
+		LotteryTypeID int64   `json:"lottery_type_id" binding:"required"`
 		Capital       float64 `json:"capital"`
 		MaxLoss       float64 `json:"max_loss"`
 		Rules         []struct {
@@ -2816,8 +3098,9 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 		if action == "" {
 			action = "full_ban"
 		}
+		bnid := batchNodeID // ⭐ local copy ต่อ iteration (หลีกเลี่ยง pointer aliasing)
 		rule := model.AutoBanRule{
-			AgentNodeID:     batchNodeID, // ⭐ root node ID
+			AgentNodeID:     &bnid, // ⭐ root/node ID (pointer)
 			LotteryTypeID:   req.LotteryTypeID,
 			BetType:         r.BetType,
 			ThresholdAmount: r.ThresholdAmount,
@@ -2852,8 +3135,19 @@ func (h *Handler) UpdateAutoBanRule(c *gin.Context) {
 		return
 	}
 	// ⭐ node user: แก้ได้เฉพาะกฎของ node ตัวเอง
-	if scope.IsNode && !func() bool { for _, nid := range scope.NodeIDs { if nid == rule.AgentNodeID { return true } }; return false }() {
-		fail(c, 403, "ไม่สามารถแก้ไขกฎของระบบได้"); return
+	if scope.IsNode && !func() bool {
+		if rule.AgentNodeID == nil {
+			return false // NULL = กฎของระบบ → node แก้ไม่ได้
+		}
+		for _, nid := range scope.NodeIDs {
+			if nid == *rule.AgentNodeID {
+				return true
+			}
+		}
+		return false
+	}() {
+		fail(c, 403, "ไม่สามารถแก้ไขกฎของระบบได้")
+		return
 	}
 	var req struct {
 		ThresholdAmount *float64 `json:"threshold_amount"`
@@ -2867,11 +3161,21 @@ func (h *Handler) UpdateAutoBanRule(c *gin.Context) {
 		return
 	}
 	updates := map[string]interface{}{"updated_at": time.Now()}
-	if req.ThresholdAmount != nil { updates["threshold_amount"] = *req.ThresholdAmount }
-	if req.Action != nil { updates["action"] = *req.Action }
-	if req.ReducedRate != nil { updates["reduced_rate"] = *req.ReducedRate }
-	if req.BetType != nil { updates["bet_type"] = *req.BetType }
-	if req.Status != nil { updates["status"] = *req.Status }
+	if req.ThresholdAmount != nil {
+		updates["threshold_amount"] = *req.ThresholdAmount
+	}
+	if req.Action != nil {
+		updates["action"] = *req.Action
+	}
+	if req.ReducedRate != nil {
+		updates["reduced_rate"] = *req.ReducedRate
+	}
+	if req.BetType != nil {
+		updates["bet_type"] = *req.BetType
+	}
+	if req.Status != nil {
+		updates["status"] = *req.Status
+	}
 	h.DB.Model(&rule).Updates(updates)
 	h.DB.First(&rule, id)
 	ok(c, rule)
@@ -2886,8 +3190,19 @@ func (h *Handler) DeleteAutoBanRule(c *gin.Context) {
 	if scope.IsNode {
 		var rule model.AutoBanRule
 		h.DB.First(&rule, id)
-		if !func() bool { for _, nid := range scope.NodeIDs { if nid == rule.AgentNodeID { return true } }; return false }() {
-			fail(c, 403, "ไม่สามารถลบกฎของระบบได้"); return
+		if !func() bool {
+			if rule.AgentNodeID == nil {
+				return false
+			}
+			for _, nid := range scope.NodeIDs {
+				if nid == *rule.AgentNodeID {
+					return true
+				}
+			}
+			return false
+		}() {
+			fail(c, 403, "ไม่สามารถลบกฎของระบบได้")
+			return
 		}
 	}
 	h.DB.Model(&model.AutoBanRule{}).Where("id = ?", id).Updates(map[string]interface{}{
@@ -2916,7 +3231,9 @@ func (h *Handler) ListYeekeeRounds(c *gin.Context) {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { query = query.Where("agent_node_id = ?", aid) }
+		if aid > 0 {
+			query = query.Where("agent_node_id = ?", aid)
+		}
 	}
 
 	// Filter by status
@@ -3034,7 +3351,9 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 		baseQuery = baseQuery.Where("agent_node_id = ?", scope.NodeID)
 	} else if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { baseQuery = baseQuery.Where("agent_node_id = ?", aid) }
+		if aid > 0 {
+			baseQuery = baseQuery.Where("agent_node_id = ?", aid)
+		}
 	}
 
 	// นับรอบตาม status
@@ -3050,7 +3369,9 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 		Where("DATE(yeekee_rounds.start_time) = ?", today)
 	if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { shootQuery = shootQuery.Where("yeekee_rounds.agent_node_id = ?", aid) }
+		if aid > 0 {
+			shootQuery = shootQuery.Where("yeekee_rounds.agent_node_id = ?", aid)
+		}
 	}
 	shootQuery.Count(&stats.TotalShoots)
 
@@ -3059,7 +3380,9 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 	pluckQuery := h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today)
 	if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { pluckQuery = pluckQuery.Where("agent_node_id = ?", aid) }
+		if aid > 0 {
+			pluckQuery = pluckQuery.Where("agent_node_id = ?", aid)
+		}
 	}
 	pluckQuery.Pluck("lottery_round_id", &yeekeeRoundIDs)
 
@@ -3103,22 +3426,36 @@ func (h *Handler) CreateStaff(c *gin.Context) {
 		Role        string `json:"role"`
 		Permissions string `json:"permissions"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
-	if req.Role == "" { req.Role = "admin" }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	if req.Role == "" {
+		req.Role = "admin"
+	}
 
 	var count int64
 	h.DB.Model(&model.Admin{}).Where("username = ?", req.Username).Count(&count)
-	if count > 0 { fail(c, 400, "username นี้ถูกใช้แล้ว"); return }
+	if count > 0 {
+		fail(c, 400, "username นี้ถูกใช้แล้ว")
+		return
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil { fail(c, 500, "failed to hash password"); return }
+	if err != nil {
+		fail(c, 500, "failed to hash password")
+		return
+	}
 
 	admin := model.Admin{
 		Username: req.Username, PasswordHash: string(hash),
 		Name: req.Name, Role: req.Role, Permissions: req.Permissions, Status: "active",
 		AgentNodeID: scope.SettingNodeID(), // ⭐ สร้างภายใต้เว็บของผู้สร้าง
 	}
-	if err := h.DB.Create(&admin).Error; err != nil { fail(c, 500, "failed to create admin"); return }
+	if err := h.DB.Create(&admin).Error; err != nil {
+		fail(c, 500, "failed to create admin")
+		return
+	}
 	ok(c, admin)
 }
 
@@ -3136,7 +3473,10 @@ func (h *Handler) UpdateStaff(c *gin.Context) {
 	} else {
 		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
-	if err := query.First(&admin).Error; err != nil { fail(c, 404, "admin not found"); return }
+	if err := query.First(&admin).Error; err != nil {
+		fail(c, 404, "admin not found")
+		return
+	}
 
 	var req struct {
 		Name        string `json:"name"`
@@ -3144,9 +3484,14 @@ func (h *Handler) UpdateStaff(c *gin.Context) {
 		Permissions string `json:"permissions"`
 		Password    string `json:"password"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
-	if req.Name != "" { admin.Name = req.Name }
+	if req.Name != "" {
+		admin.Name = req.Name
+	}
 	// ⭐ Validate role — ห้ามตั้ง role เกินสิทธิ์ตัวเอง
 	if req.Role != "" {
 		allowedRoles := map[string]bool{"operator": true, "viewer": true}
@@ -3173,7 +3518,10 @@ func (h *Handler) UpdateStaff(c *gin.Context) {
 	}
 	if req.Password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil { fail(c, 500, "failed to hash password"); return }
+		if err != nil {
+			fail(c, 500, "failed to hash password")
+			return
+		}
 		admin.PasswordHash = string(hash)
 	}
 	h.DB.Save(&admin)
@@ -3185,8 +3533,13 @@ func (h *Handler) UpdateStaff(c *gin.Context) {
 func (h *Handler) UpdateStaffStatus(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var req struct { Status string `json:"status" binding:"required"` }
-	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
+	var req struct {
+		Status string `json:"status" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 
 	query := h.DB.Model(&model.Admin{}).Where("id = ?", id)
 	if scope.IsNode {
@@ -3195,7 +3548,10 @@ func (h *Handler) UpdateStaffStatus(c *gin.Context) {
 		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	result := query.Update("status", req.Status)
-	if result.RowsAffected == 0 { fail(c, 404, "admin not found หรือไม่มีสิทธิ์"); return }
+	if result.RowsAffected == 0 {
+		fail(c, 404, "admin not found หรือไม่มีสิทธิ์")
+		return
+	}
 	ok(c, gin.H{"id": id, "status": req.Status})
 }
 
@@ -3205,7 +3561,10 @@ func (h *Handler) DeleteStaff(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
-	if id == adminID { fail(c, 400, "ไม่สามารถลบตัวเองได้"); return }
+	if id == adminID {
+		fail(c, 400, "ไม่สามารถลบตัวเองได้")
+		return
+	}
 
 	query := h.DB.Model(&model.Admin{}).Where("id = ?", id)
 	if scope.IsNode {
@@ -3214,7 +3573,10 @@ func (h *Handler) DeleteStaff(c *gin.Context) {
 		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	result := query.Update("status", "deleted")
-	if result.RowsAffected == 0 { fail(c, 404, "admin not found หรือไม่มีสิทธิ์"); return }
+	if result.RowsAffected == 0 {
+		fail(c, 404, "admin not found หรือไม่มีสิทธิ์")
+		return
+	}
 	ok(c, gin.H{"id": id, "status": "deleted"})
 }
 
@@ -3234,7 +3596,8 @@ func (h *Handler) GetStaffLoginHistory(c *gin.Context) {
 		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	if err := query.First(&admin).Error; err != nil {
-		fail(c, 404, "ไม่พบพนักงาน หรือไม่มีสิทธิ์ดู"); return
+		fail(c, 404, "ไม่พบพนักงาน หรือไม่มีสิทธิ์ดู")
+		return
 	}
 
 	var history []model.AdminLoginHistory
@@ -3258,7 +3621,8 @@ func (h *Handler) GetStaffActivity(c *gin.Context) {
 		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	if err := query.First(&admin).Error; err != nil {
-		fail(c, 404, "ไม่พบพนักงาน หรือไม่มีสิทธิ์ดู"); return
+		fail(c, 404, "ไม่พบพนักงาน หรือไม่มีสิทธิ์ดู")
+		return
 	}
 
 	var logs []model.ActivityLog
@@ -3273,31 +3637,35 @@ func (h *Handler) GetStaffActivity(c *gin.Context) {
 // RegisterBankAccountRKAuto ลงทะเบียนบัญชีกับ RKAUTO
 // POST /api/v1/bank-accounts/:id/register-rkauto
 // Body: { "bank_system": "SMS|BANK|KBIZ", "username": "...", "password": "...",
-//         "mobile_number": "..." (SMS), "bank_code": "..." (BANK) }
+//
+//	"mobile_number": "..." (SMS), "bank_code": "..." (BANK) }
 func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	if h.RKAutoClient == nil {
-		fail(c, 400, "RKAUTO ไม่ได้เปิดใช้งาน (set RKAUTO_ENABLED=true)"); return
+		fail(c, 400, "RKAUTO ไม่ได้เปิดใช้งาน (set RKAUTO_ENABLED=true)")
+		return
 	}
 	rkautoClient, _ := h.RKAutoClient.(*rkautoLib.Client)
 	if rkautoClient == nil {
-		fail(c, 500, "RKAUTO client error"); return
+		fail(c, 500, "RKAUTO client error")
+		return
 	}
 
 	var req struct {
-		BankSystem    string `json:"bank_system" binding:"required"`   // SMS, BANK, KBIZ
-		Username      string `json:"username"`
-		Password      string `json:"password"`
-		MobileNumber  string `json:"mobile_number,omitempty"`
-		BankCode      string `json:"bank_code,omitempty"`
-		IsDeposit     bool   `json:"is_deposit"`
-		IsWithdraw    bool   `json:"is_withdraw"`
-		RKAutoToken1  string `json:"rkauto_token1,omitempty"`  // Token จากการเจน RKAUTO (ไม่เก็บ DB)
-		RKAutoToken2  string `json:"rkauto_token2,omitempty"`  // Token ตัวที่ 2 (ไม่เก็บ DB)
+		BankSystem   string `json:"bank_system" binding:"required"` // SMS, BANK, KBIZ
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+		MobileNumber string `json:"mobile_number,omitempty"`
+		BankCode     string `json:"bank_code,omitempty"`
+		IsDeposit    bool   `json:"is_deposit"`
+		IsWithdraw   bool   `json:"is_withdraw"`
+		RKAutoToken1 string `json:"rkauto_token1,omitempty"` // Token จากการเจน RKAUTO (ไม่เก็บ DB)
+		RKAutoToken2 string `json:"rkauto_token2,omitempty"` // Token ตัวที่ 2 (ไม่เก็บ DB)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	// ดึงข้อมูลบัญชีจาก DB
@@ -3309,7 +3677,8 @@ func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 	var bank BankInfo
 	h.DB.Table("agent_bank_accounts").Select("account_number, account_name, bank_code").Where("id = ?", id).Scan(&bank)
 	if bank.AccountName == "" {
-		fail(c, 404, "ไม่พบบัญชี"); return
+		fail(c, 404, "ไม่พบบัญชี")
+		return
 	}
 
 	// ⚠️ ใช้ RKAUTO tokens (จากการเจน) เป็น username/password ถ้ามี
@@ -3349,11 +3718,13 @@ func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 	resp, err := rkautoClient.RegisterBankAccount(registerReq)
 	if err != nil {
 		log.Printf("⚠️ RKAUTO register failed for bank #%d: %v", id, err)
-		fail(c, 500, "RKAUTO register failed: "+err.Error()); return
+		fail(c, 500, "RKAUTO register failed: "+err.Error())
+		return
 	}
 
 	if !resp.Success {
-		fail(c, 400, "RKAUTO: "+resp.Message); return
+		fail(c, 400, "RKAUTO: "+resp.Message)
+		return
 	}
 
 	// อัพเดท DB — ⚠️ encrypt bank credentials ด้วย AES-256
@@ -3374,15 +3745,24 @@ func (h *Handler) RegisterBankAccountRKAuto(c *gin.Context) {
 // POST /api/v1/bank-accounts/:id/activate-rkauto
 func (h *Handler) ActivateBankAccountRKAuto(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if h.RKAutoClient == nil { fail(c, 400, "RKAUTO disabled"); return }
+	if h.RKAutoClient == nil {
+		fail(c, 400, "RKAUTO disabled")
+		return
+	}
 	rkautoClient, _ := h.RKAutoClient.(*rkautoLib.Client)
 
 	var uuid string
 	h.DB.Table("agent_bank_accounts").Select("rkauto_uuid").Where("id = ?", id).Row().Scan(&uuid)
-	if uuid == "" { fail(c, 400, "บัญชีนี้ยังไม่ได้ register กับ RKAUTO"); return }
+	if uuid == "" {
+		fail(c, 400, "บัญชีนี้ยังไม่ได้ register กับ RKAUTO")
+		return
+	}
 
 	_, err := rkautoClient.ActivateBankAccount(uuid)
-	if err != nil { fail(c, 500, "RKAUTO activate failed: "+err.Error()); return }
+	if err != nil {
+		fail(c, 500, "RKAUTO activate failed: "+err.Error())
+		return
+	}
 
 	h.DB.Exec("UPDATE agent_bank_accounts SET rkauto_status = 'active' WHERE id = ?", id)
 	ok(c, gin.H{"id": id, "rkauto_status": "active"})
@@ -3392,15 +3772,24 @@ func (h *Handler) ActivateBankAccountRKAuto(c *gin.Context) {
 // POST /api/v1/bank-accounts/:id/deactivate-rkauto
 func (h *Handler) DeactivateBankAccountRKAuto(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if h.RKAutoClient == nil { fail(c, 400, "RKAUTO disabled"); return }
+	if h.RKAutoClient == nil {
+		fail(c, 400, "RKAUTO disabled")
+		return
+	}
 	rkautoClient, _ := h.RKAutoClient.(*rkautoLib.Client)
 
 	var uuid string
 	h.DB.Table("agent_bank_accounts").Select("rkauto_uuid").Where("id = ?", id).Row().Scan(&uuid)
-	if uuid == "" { fail(c, 400, "บัญชีนี้ยังไม่ได้ register กับ RKAUTO"); return }
+	if uuid == "" {
+		fail(c, 400, "บัญชีนี้ยังไม่ได้ register กับ RKAUTO")
+		return
+	}
 
 	_, err := rkautoClient.DeactivateBankAccount(uuid)
-	if err != nil { fail(c, 500, "RKAUTO deactivate failed: "+err.Error()); return }
+	if err != nil {
+		fail(c, 500, "RKAUTO deactivate failed: "+err.Error())
+		return
+	}
 
 	h.DB.Exec("UPDATE agent_bank_accounts SET rkauto_status = 'deactivated' WHERE id = ?", id)
 	ok(c, gin.H{"id": id, "rkauto_status": "deactivated"})
@@ -3410,8 +3799,8 @@ func (h *Handler) DeactivateBankAccountRKAuto(c *gin.Context) {
 // GET /api/v1/staff/permissions
 func (h *Handler) GetAvailablePermissions(c *gin.Context) {
 	type PermGroup struct {
-		Group string   `json:"group"`
-		Label string   `json:"label"`
+		Group string `json:"group"`
+		Label string `json:"label"`
 		Perms []struct {
 			Key   string `json:"key"`
 			Label string `json:"label"`
@@ -3484,7 +3873,8 @@ func (h *Handler) GetYeekeeAgentConfig(c *gin.Context) {
 	var yeekeeTypeID int64
 	h.DB.Table("lottery_types").Select("id").Where("code = ?", "YEEKEE").Scan(&yeekeeTypeID)
 	if yeekeeTypeID == 0 {
-		fail(c, 404, "YEEKEE lottery type not found"); return
+		fail(c, 404, "YEEKEE lottery type not found")
+		return
 	}
 
 	// ดึง root nodes ทั้งหมด + สถานะยี่กี (LEFT JOIN agent_lottery_config)
@@ -3525,26 +3915,31 @@ func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
 		Enabled     bool  `json:"enabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, err.Error()); return
+		fail(c, 400, err.Error())
+		return
 	}
 
 	// ดึง YEEKEE lottery type ID
 	var yeekeeTypeID int64
 	h.DB.Table("lottery_types").Select("id").Where("code = ?", "YEEKEE").Scan(&yeekeeTypeID)
 	if yeekeeTypeID == 0 {
-		fail(c, 404, "YEEKEE lottery type not found"); return
+		fail(c, 404, "YEEKEE lottery type not found")
+		return
 	}
 
 	// เช็คว่า root node มีจริง
 	var nodeExists int64
 	h.DB.Table("agent_nodes").Where("id = ? AND role = 'admin' AND status = ?", req.AgentNodeID, "active").Count(&nodeExists)
 	if nodeExists == 0 {
-		fail(c, 404, "agent node not found"); return
+		fail(c, 404, "agent node not found")
+		return
 	}
 
 	// UPSERT: INSERT ... ON DUPLICATE KEY UPDATE
 	enabledInt := 0
-	if req.Enabled { enabledInt = 1 }
+	if req.Enabled {
+		enabledInt = 1
+	}
 
 	h.DB.Exec(`
 		INSERT INTO agent_lottery_config (agent_node_id, lottery_type_id, enabled, created_at)
@@ -3553,7 +3948,9 @@ func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
 	`, req.AgentNodeID, yeekeeTypeID, enabledInt, enabledInt)
 
 	action := "ปิด"
-	if req.Enabled { action = "เปิด" }
+	if req.Enabled {
+		action = "เปิด"
+	}
 	log.Printf("🎯 Yeekee %s for root node %d", action, req.AgentNodeID)
 
 	ok(c, gin.H{
@@ -3642,7 +4039,13 @@ func (h *Handler) ManualSettleYeekeeRound(c *gin.Context) {
 	})
 
 	// Settlement — เทียบ bets + จ่ายเงิน
-	settleYeekeeBets(h.DB, yr.LotteryRoundID, yr.AgentNodeID, roundResult)
+	// AIDEV-NOTE: YeekeeRound เก็บ agent_id (ไม่ใช่ node_id); lookup root node ของ agent นั้น
+	var rootNodeID int64
+	h.DB.Raw("SELECT id FROM agent_nodes WHERE agent_id = ? AND parent_id IS NULL LIMIT 1", yr.AgentID).Scan(&rootNodeID)
+	if rootNodeID == 0 {
+		rootNodeID = 1 // fallback
+	}
+	settleYeekeeBets(h.DB, yr.LotteryRoundID, rootNodeID, roundResult)
 
 	// บันทึก action log
 	logManualSettle(h.DB, c, yr, resultNumber, "settled")
@@ -3771,7 +4174,7 @@ func logManualSettle(db *gorm.DB, c *gin.Context, yr model.YeekeeRound, resultNu
 
 	details, _ := json.Marshal(map[string]interface{}{
 		"round_no":      yr.RoundNo,
-		"agent_node_id": yr.AgentNodeID,
+		"agent_id":      yr.AgentID, // YeekeeRound เก็บ agent_id (ไม่มี agent_node_id)
 		"result_number": resultNumber,
 		"outcome":       outcome,
 	})

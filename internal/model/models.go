@@ -58,6 +58,9 @@ type Member struct {
 	Email        string  `gorm:"size:100" json:"email"`
 	Balance      float64 `gorm:"type:decimal(15,2);not null;default:0" json:"balance"`
 	Status       string  `gorm:"size:20;not null;default:active" json:"status"`
+	// AgentNodeID — node ที่สมาชิกสังกัด (multi-tenant scoping per #016 downline)
+	// AIDEV-NOTE: NULL = ยังไม่ผูก node (ข้อมูลเก่าก่อน migration 016)
+	AgentNodeID *int64 `gorm:"index" json:"agent_node_id"`
 	// ReferredBy — ID ของสมาชิกที่แนะนำมา (affiliate referrer)
 	ReferredBy *int64 `gorm:"index" json:"referred_by,omitempty"`
 	// ข้อมูลธนาคาร (กรอกตอนสมัคร)
@@ -83,12 +86,14 @@ type LotteryType struct {
 }
 
 type BetType struct {
-	ID          int64     `gorm:"primaryKey" json:"id"`
-	Name        string    `gorm:"size:50;not null" json:"name"`
-	Code        string    `gorm:"size:20;uniqueIndex;not null" json:"code"`
-	DigitCount  int       `gorm:"not null" json:"digit_count"`
-	Description string    `gorm:"type:text" json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64  `gorm:"primaryKey" json:"id"`
+	Name        string `gorm:"size:50;not null" json:"name"`
+	Code        string `gorm:"size:20;uniqueIndex;not null" json:"code"`
+	DigitCount  int    `gorm:"not null" json:"digit_count"`
+	Description string `gorm:"type:text" json:"description"`
+	// SortOrder — ลำดับการแสดงผลใน UI (น้อย = มาก่อน); 0 = ไม่กำหนด (เรียงตาม id)
+	SortOrder int       `gorm:"not null;default:0" json:"sort_order"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type LotteryRound struct {

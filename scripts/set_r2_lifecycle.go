@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 // set_r2_lifecycle.go — ตั้ง Lifecycle rule บน R2 bucket
 //
 // Rule: ลบไฟล์ใน folder "slip/" อัตโนมัติหลัง 30 วัน

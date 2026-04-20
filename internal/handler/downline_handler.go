@@ -7,16 +7,18 @@
 //   - frontend: admin-web (#6) หน้า /downline
 //
 // Endpoints:
-//   GET    /downline/tree            → ดึง tree ทั้งหมด
-//   GET    /downline/nodes           → ดึง nodes (flat, paginated)
-//   GET    /downline/nodes/:id       → ดึง node detail + children
-//   POST   /downline/nodes           → สร้าง node ใหม่
-//   PUT    /downline/nodes/:id       → แก้ไข node
-//   DELETE /downline/nodes/:id       → ลบ node (ต้องไม่มีลูก)
-//   GET    /downline/nodes/:id/commission  → ดูตั้งค่า % แยกหวย
-//   PUT    /downline/nodes/:id/commission  → ตั้ง % แยกหวย
-//   GET    /downline/profits         → รายงานกำไรรวม
-//   GET    /downline/profits/:nodeId → รายงานกำไรของ node
+//
+//	GET    /downline/tree            → ดึง tree ทั้งหมด
+//	GET    /downline/nodes           → ดึง nodes (flat, paginated)
+//	GET    /downline/nodes/:id       → ดึง node detail + children
+//	POST   /downline/nodes           → สร้าง node ใหม่
+//	PUT    /downline/nodes/:id       → แก้ไข node
+//	DELETE /downline/nodes/:id       → ลบ node (ต้องไม่มีลูก)
+//	GET    /downline/nodes/:id/commission  → ดูตั้งค่า % แยกหวย
+//	PUT    /downline/nodes/:id/commission  → ตั้ง % แยกหวย
+//	GET    /downline/profits         → รายงานกำไรรวม
+//	GET    /downline/profits/:nodeId → รายงานกำไรของ node
+//	GET    /downline/report           → รายงานเคลียสายงาน (เว็บตัวเอง + ใต้สาย + สรุป)
 package handler
 
 import (
@@ -41,6 +43,7 @@ import (
 // ใช้สำหรับ: แสดง tree view ในหน้า admin
 // Query params:
 //   - agent_id (optional, default=1)
+//
 // =============================================================================
 func (h *Handler) GetDownlineTree(c *gin.Context) {
 	agentID := int64(1)
@@ -153,6 +156,7 @@ func (h *Handler) GetDownlineTree(c *gin.Context) {
 //   - role (filter by role)
 //   - parent_id (filter by parent)
 //   - status (filter: active/suspended)
+//
 // =============================================================================
 func (h *Handler) ListDownlineNodes(c *gin.Context) {
 	page, perPage := pageParams(c)
@@ -208,8 +212,16 @@ func (h *Handler) GetDownlineNode(c *gin.Context) {
 	// ⭐ node user: ดูได้เฉพาะ nodes ในสายตัวเอง
 	if scope.IsNode {
 		found := false
-		for _, nid := range scope.NodeIDs { if nid == id { found = true; break } }
-		if !found { fail(c, 403, "ไม่มีสิทธิ์"); return }
+		for _, nid := range scope.NodeIDs {
+			if nid == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fail(c, 403, "ไม่มีสิทธิ์")
+			return
+		}
 	}
 
 	var node model.AgentNode
@@ -253,18 +265,19 @@ func (h *Handler) GetDownlineNode(c *gin.Context) {
 //   - phone, line_id, note (optional)
 //
 // Business Rules:
-//   1. share_percent < parent.share_percent
-//   2. role ถูกต้องตามลำดับ
-//   3. username ไม่ซ้ำในเดียวกัน agent
+//  1. share_percent < parent.share_percent
+//  2. role ถูกต้องตามลำดับ
+//  3. username ไม่ซ้ำในเดียวกัน agent
+//
 // =============================================================================
 func (h *Handler) CreateDownlineNode(c *gin.Context) {
 	var req struct {
-		ParentID     *int64  `json:"parent_id"`                          // nil = root (admin)
+		ParentID     *int64  `json:"parent_id"` // nil = root (admin)
 		Name         string  `json:"name" binding:"required"`
 		Username     string  `json:"username" binding:"required"`
 		Password     string  `json:"password" binding:"required"`
 		SharePercent float64 `json:"share_percent" binding:"required"`
-		Role         string  `json:"role"`                                // optional: auto จาก parent
+		Role         string  `json:"role"` // optional: auto จาก parent
 		Phone        string  `json:"phone"`
 		LineID       string  `json:"line_id"`
 		Note         string  `json:"note"`
@@ -390,6 +403,7 @@ func (h *Handler) CreateDownlineNode(c *gin.Context) {
 // Business Rules:
 //   - share_percent ใหม่ต้อง < parent.share_percent
 //   - share_percent ใหม่ต้อง > ลูกทุกคน.share_percent
+//
 // =============================================================================
 func (h *Handler) UpdateDownlineNode(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -504,6 +518,7 @@ func (h *Handler) UpdateDownlineNode(c *gin.Context) {
 //   - ต้องไม่มี children
 //   - ต้องไม่มี members (agent_node_id ชี้มาที่ node นี้)
 //   - ห้ามลบ root node (admin)
+//
 // =============================================================================
 func (h *Handler) DeleteDownlineNode(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -523,7 +538,10 @@ func (h *Handler) DeleteDownlineNode(c *gin.Context) {
 	if scope.IsNode {
 		found := false
 		for _, nid := range scope.NodeIDs {
-			if nid == id { found = true; break }
+			if nid == id {
+				found = true
+				break
+			}
 		}
 		if !found {
 			fail(c, 403, "ไม่มีสิทธิ์ลบ node นี้")
@@ -790,6 +808,7 @@ func (h *Handler) GetDownlineProfits(c *gin.Context) {
 // Query params:
 //   - date_from, date_to
 //   - page, per_page
+//
 // =============================================================================
 func (h *Handler) GetNodeProfits(c *gin.Context) {
 	nodeID, err := strconv.ParseInt(c.Param("nodeId"), 10, 64)
@@ -853,6 +872,191 @@ func (h *Handler) GetNodeProfits(c *gin.Context) {
 				"page":     page,
 				"per_page": perPage,
 			},
+		},
+	})
+}
+
+// =============================================================================
+// GET /downline/report — รายงานเคลียสายงาน (v1 re-implementation 2026-04-20)
+//
+// Rule: memory/downline_report_formulas.md
+//
+// Response shape (matches admin-web/src/app/downline/report/page.tsx):
+//
+//	{
+//	  my_node:  {id, name, username, role, share_percent},
+//	  parent:   {name, share_percent, diff_percent},
+//	  is_root:  bool,
+//	  direct:   {net_result, my_profit, bets, member_count},
+//	  children: [{node_id, name, username, role, share_percent, diff_percent,
+//	              tree_net, settlement, bets, member_count}],
+//	  summary:  {direct_profit, downline_profit, total_profit,
+//	             total_tree_net, parent_settlement},
+//	}
+//
+// Formulas:
+//
+//	direct_profit     = direct.net_result × my_share% / 100
+//	child.settlement  = child.tree_net × (100 - child.share_percent) / 100   (เคลียใต้สาย)
+//	downline_profit   = Σ(child.tree_net × diff% / 100)   where diff = my% - child%
+//	total_tree_net    = direct.net_result + Σ(children.tree_net)
+//	parent_settlement = total_tree_net × (100 - my_share%) / 100   (เคลียหัวสาย)
+//	total_profit      = direct_profit + downline_profit
+//
+// AIDEV-NOTE: Data source = agent_profit_transactions WHERE child_percent = 0
+// (leaf records — direct member bets). Avoids double-counting when subtree
+// is walked via path LIKE.
+//
+// Query params: date_from, date_to (YYYY-MM-DD; inclusive-inclusive)
+// =============================================================================
+func (h *Handler) GetDownlineReport(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
+
+	// 1. หา my_node — node ตัวเอง หรือ root ของ scope admin
+	var myNodeID int64
+	if scope.IsNode {
+		myNodeID = scope.NodeID
+	} else {
+		myNodeID = scope.RootNodeID
+	}
+	if myNodeID == 0 {
+		fail(c, 400, "ไม่พบข้อมูล node — scope ไม่ถูกต้อง")
+		return
+	}
+	var myNode model.AgentNode
+	if err := h.DB.First(&myNode, myNodeID).Error; err != nil {
+		fail(c, 404, "ไม่พบ node")
+		return
+	}
+
+	// 2. date range (default = today)
+	today := time.Now().Format("2006-01-02")
+	dateFrom := c.DefaultQuery("date_from", today)
+	dateTo := c.DefaultQuery("date_to", today)
+
+	// 3. direct — bets ของ member ที่สังกัด node ตัวเอง (child_percent=0)
+	type directRow struct {
+		NetResult float64 `gorm:"column:net_result"`
+		Bets      int64   `gorm:"column:bets"`
+	}
+	var direct directRow
+	h.DB.Raw(`
+		SELECT COALESCE(SUM(net_result),0) AS net_result, COUNT(*) AS bets
+		FROM agent_profit_transactions
+		WHERE agent_node_id = ? AND child_percent = 0
+		  AND created_at >= ? AND created_at < DATE_ADD(?, INTERVAL 1 DAY)
+	`, myNode.ID, dateFrom, dateTo).Scan(&direct)
+
+	var directMemberCount int64
+	h.DB.Raw(`SELECT COUNT(*) FROM members WHERE agent_node_id = ?`, myNode.ID).Scan(&directMemberCount)
+
+	directProfit := math.Round(direct.NetResult*myNode.SharePercent) / 100
+
+	// 4. children — ลูกสายตรง (parent_id = my.id)
+	var childNodes []model.AgentNode
+	h.DB.Where("parent_id = ?", myNode.ID).Order("id ASC").Find(&childNodes)
+
+	// 5. สำหรับแต่ละ child: คำนวณ tree_net (ตัวเอง + descendants ทั้งหมด)
+	type childReport struct {
+		NodeID       int64   `json:"node_id"`
+		Name         string  `json:"name"`
+		Username     string  `json:"username"`
+		Role         string  `json:"role"`
+		SharePercent float64 `json:"share_percent"`
+		DiffPercent  float64 `json:"diff_percent"`
+		TreeNet      float64 `json:"tree_net"`
+		Settlement   float64 `json:"settlement"`
+		Bets         int64   `json:"bets"`
+		MemberCount  int64   `json:"member_count"`
+	}
+	children := make([]childReport, 0, len(childNodes))
+	var totalChildrenTreeNet, downlineProfit float64
+
+	for _, ch := range childNodes {
+		// subtree = nodes ที่ path LIKE ch.path%
+		type treeAgg struct {
+			Net  float64 `gorm:"column:net"`
+			Bets int64   `gorm:"column:bets"`
+		}
+		var agg treeAgg
+		h.DB.Raw(`
+			SELECT COALESCE(SUM(pt.net_result),0) AS net, COUNT(*) AS bets
+			FROM agent_profit_transactions pt
+			JOIN agent_nodes n ON n.id = pt.agent_node_id
+			WHERE n.path LIKE ? AND pt.child_percent = 0
+			  AND pt.created_at >= ? AND pt.created_at < DATE_ADD(?, INTERVAL 1 DAY)
+		`, ch.Path+"%", dateFrom, dateTo).Scan(&agg)
+
+		var memberCount int64
+		h.DB.Raw(`
+			SELECT COUNT(*) FROM members m
+			JOIN agent_nodes n ON n.id = m.agent_node_id
+			WHERE n.path LIKE ?
+		`, ch.Path+"%").Scan(&memberCount)
+
+		diff := myNode.SharePercent - ch.SharePercent
+		settlement := math.Round(agg.Net*(100-ch.SharePercent)) / 100
+		myShareOfChild := math.Round(agg.Net*diff) / 100
+
+		children = append(children, childReport{
+			NodeID:       ch.ID,
+			Name:         ch.Name,
+			Username:     ch.Username,
+			Role:         ch.Role,
+			SharePercent: ch.SharePercent,
+			DiffPercent:  diff,
+			TreeNet:      math.Round(agg.Net*100) / 100,
+			Settlement:   settlement,
+			Bets:         agg.Bets,
+			MemberCount:  memberCount,
+		})
+		totalChildrenTreeNet += agg.Net
+		downlineProfit += myShareOfChild
+	}
+
+	// 6. summary
+	totalTreeNet := direct.NetResult + totalChildrenTreeNet
+	parentSettlement := math.Round(totalTreeNet*(100-myNode.SharePercent)) / 100
+	totalProfit := directProfit + downlineProfit
+
+	// 7. parent info
+	isRoot := myNode.ParentID == nil
+	parentInfo := gin.H{"name": "", "share_percent": 0.0, "diff_percent": 0.0}
+	if !isRoot {
+		var parent model.AgentNode
+		if err := h.DB.First(&parent, *myNode.ParentID).Error; err == nil {
+			parentInfo = gin.H{
+				"name":          parent.Name,
+				"share_percent": parent.SharePercent,
+				"diff_percent":  parent.SharePercent - myNode.SharePercent,
+			}
+		}
+	}
+
+	// 8. response
+	ok(c, gin.H{
+		"my_node": gin.H{
+			"id":            myNode.ID,
+			"name":          myNode.Name,
+			"username":      myNode.Username,
+			"role":          myNode.Role,
+			"share_percent": myNode.SharePercent,
+		},
+		"parent":  parentInfo,
+		"is_root": isRoot,
+		"direct": gin.H{
+			"net_result":   math.Round(direct.NetResult*100) / 100,
+			"my_profit":    directProfit,
+			"bets":         direct.Bets,
+			"member_count": directMemberCount,
+		},
+		"children": children,
+		"summary": gin.H{
+			"direct_profit":     directProfit,
+			"downline_profit":   math.Round(downlineProfit*100) / 100,
+			"total_profit":      math.Round(totalProfit*100) / 100,
+			"total_tree_net":    math.Round(totalTreeNet*100) / 100,
+			"parent_settlement": parentSettlement,
 		},
 	})
 }
