@@ -1,23 +1,26 @@
-// Package handler — member_levels.go
-// ระบบ Member Level สำหรับ admin-api (#5)
+// Package handler — member_levels.go (v3 — 2026-04-20 rebuild)
 //
-// ⭐ ฟีเจอร์:
-// - CRUD levels (Bronze, Silver, Gold, Platinum ฯลฯ)
-// - กำหนดเงื่อนไขเลื่อน level: ยอดฝากขั้นต่ำ, จำนวน bet ขั้นต่ำ
-// - ผลประโยชน์แต่ละ level: commission rate %, cashback %, bonus %
-// - แสดงจำนวนสมาชิกในแต่ละ level (realtime count)
-//
-// ความสัมพันธ์:
-// - ตาราง member_levels → share DB กับ member-api (#3)
-// - member-web (#4) ใช้แสดงสิทธิประโยชน์
-// - admin-web (#6) ใช้ CRUD + ตั้งค่า commission rate
+// ⭐ ระบบ Member Level v3 (โละของเก่า)
+//   - เกณฑ์เดียว: ยอดฝาก rolling 30 วัน (`min_deposit_30d`)
+//   - สิทธิ์: Badge/Icon cosmetic อย่างเดียว (ไม่มี commission/cashback/bonus)
+//   - Auto promote/demote: member-api cron daily 02:00
+//   - Admin override: `PUT /members/:id/level` → set level + lock (cron จะไม่แก้)
+//   - ระบบ scope per-agent (แต่ละเว็บใต้สายตั้งระดับเอง)
 //
 // Routes:
-//   GET    /api/v1/member-levels          → รายการ level ทั้งหมด + member count
-//   POST   /api/v1/member-levels          → สร้าง level ใหม่
-//   PUT    /api/v1/member-levels/:id      → แก้ไข level
-//   DELETE /api/v1/member-levels/:id      → ลบ level (ถ้าไม่มีสมาชิกอยู่)
-//   PUT    /api/v1/member-levels/reorder  → จัดลำดับ level
+//   GET    /api/v1/member-levels               → list + member_count ต่อระดับ
+//   POST   /api/v1/member-levels               → สร้าง
+//   PUT    /api/v1/member-levels/:id           → แก้
+//   DELETE /api/v1/member-levels/:id           → ลบ (ต้องไม่มีสมาชิกอยู่)
+//   PUT    /api/v1/member-levels/reorder       → จัดลำดับ
+//   PUT    /api/v1/members/:id/level           → override (set + lock)
+//   DELETE /api/v1/members/:id/level-lock      → ยกเลิก lock (ให้ cron คำนวณใหม่)
+//   GET    /api/v1/members/:id/level-history   → ประวัติการเปลี่ยนระดับ
+//
+// ความสัมพันธ์:
+//   - DB: share กับ member-api (ตาราง member_levels, members.level_id*, member_level_history)
+//   - Cron: member-api/internal/job/level_recalc_cron.go คำนวณ + บันทึก history
+//   - Rule: docs/rules/member_levels.md
 package handler
 
 import (
@@ -30,184 +33,187 @@ import (
 )
 
 // =============================================================================
-// Inline Model — memberLevel
-// ⭐ ใช้ inline struct เพราะไม่ต้อง share กับ service layer
+// Models (inline) — v3 schema
 // =============================================================================
 
-// memberLevel โครงสร้างตาราง member_levels
-// เก็บชื่อ level, สี, เงื่อนไข, ผลประโยชน์
+// memberLevel — โครงสร้าง `member_levels` (v3 — ตัด commission/cashback/bonus ออก)
 type memberLevel struct {
 	ID             int64     `json:"id" gorm:"primaryKey"`
-	AgentID        int64     `json:"agent_id" gorm:"not null;default:1;index"`       // ⭐ 1 agent = 1 ชุด levels
-	AgentNodeID    *int64    `json:"agent_node_id" gorm:"index"`                      // ⭐ NULL=ระบบกลาง (admin), มีค่า=เฉพาะ node
-	Name           string    `json:"name" gorm:"size:50;not null"`                    // ชื่อ level เช่น "Bronze"
-	Color          string    `json:"color" gorm:"size:20;not null;default:#CD7F32"`   // สีแสดงใน UI
-	Icon           string    `json:"icon" gorm:"size:50"`                              // icon (Lucide name)
-	SortOrder      int       `json:"sort_order" gorm:"not null;default:0"`             // ลำดับ (น้อย→สูง)
-	MinDeposit     float64   `json:"min_deposit" gorm:"type:decimal(15,2);default:0"` // ยอดฝากขั้นต่ำเพื่อเลื่อน level
-	MinBets        int       `json:"min_bets" gorm:"default:0"`                       // จำนวน bet ขั้นต่ำ
-	CommissionRate float64   `json:"commission_rate" gorm:"type:decimal(5,2);default:0"` // ค่าคอม affiliate %
-	CashbackRate   float64   `json:"cashback_rate" gorm:"type:decimal(5,2);default:0"`  // คืนยอดเสีย %
-	BonusPct       float64   `json:"bonus_pct" gorm:"type:decimal(5,2);default:0"`      // โบนัสฝากเงิน %
-	MaxWithdrawDay float64   `json:"max_withdraw_day" gorm:"type:decimal(15,2);default:0"` // ถอนสูงสุด/วัน (0=ไม่จำกัด)
-	Description    string    `json:"description" gorm:"type:text"`                        // คำอธิบาย level
-	Status         string    `json:"status" gorm:"size:20;not null;default:active"`       // active/inactive
+	AgentNodeID    *int64    `json:"agent_node_id" gorm:"index"`
+	Name           string    `json:"name" gorm:"size:50;not null"`
+	Color          string    `json:"color" gorm:"size:20;not null;default:#CD7F32"`
+	Icon           string    `json:"icon" gorm:"size:50"`
+	SortOrder      int       `json:"sort_order" gorm:"not null;default:0"`
+	MinDeposit30d  float64   `json:"min_deposit_30d" gorm:"column:min_deposit_30d;type:decimal(15,2);default:0"`
+	Description    string    `json:"description" gorm:"type:text"`
+	Status         string    `json:"status" gorm:"size:20;not null;default:active"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
-	MemberCount    int64     `json:"member_count" gorm:"-"` // ⭐ computed field — ไม่เก็บ DB
+	MemberCount    int64     `json:"member_count" gorm:"-"` // computed (not stored)
 }
 
 func (memberLevel) TableName() string { return "member_levels" }
 
+// memberLevelHistory — `member_level_history` (audit trail)
+type memberLevelHistory struct {
+	ID                  int64     `json:"id" gorm:"primaryKey"`
+	MemberID            int64     `json:"member_id"`
+	FromLevelID         *int64    `json:"from_level_id"`
+	ToLevelID           *int64    `json:"to_level_id"`
+	Reason              string    `json:"reason"` // auto|admin_override|admin_unlock|initial
+	Deposit30dSnapshot  float64   `json:"deposit_30d_snapshot" gorm:"column:deposit_30d_snapshot"`
+	ChangedByAdminID    *int64    `json:"changed_by_admin_id"`
+	Note                string    `json:"note"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+func (memberLevelHistory) TableName() string { return "member_level_history" }
+
+// getAdminIDPtr — ดึง admin_id จาก gin context (รองรับทั้ง int64 + float64 จาก JWT)
+// คืน *int64 (nil ถ้าไม่มี — ใช้กับ column ที่เก็บ NULL ได้)
+func getAdminIDPtr(c *gin.Context) *int64 {
+	v, exists := c.Get("admin_id")
+	if !exists {
+		return nil
+	}
+	if id, ok := v.(int64); ok && id > 0 {
+		return &id
+	}
+	if idF, ok := v.(float64); ok && idF > 0 {
+		id := int64(idF)
+		return &id
+	}
+	return nil
+}
+
 // =============================================================================
 // ListMemberLevels — GET /api/v1/member-levels
-// ดึง level ทั้งหมด + นับจำนวนสมาชิกในแต่ละ level
+// ⭐ scope per-node — node เห็นเฉพาะของตัวเอง, admin เห็น rootNode
+// ⭐ แนบ member_count + (optional) distribution pct คำนวณฝั่ง frontend
 // =============================================================================
 func (h *Handler) ListMemberLevels(c *gin.Context) {
-	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var levels []memberLevel
-
-	// ดึง levels ทั้งหมด เรียงตาม sort_order (น้อย→มาก)
-	// ⭐ scope ตามสายงาน: node เห็นเฉพาะ levels ของตัวเอง, admin เห็นของระบบกลาง
-	query := h.DB.Where("agent_id = ?", 1)
+	q := h.DB.Model(&memberLevel{})
 	if scope.IsNode {
-		query = query.Where("agent_node_id = ?", scope.NodeID)
+		q = q.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		q = q.Where("agent_node_id = ?", scope.RootNodeID)
 	}
-	if err := query.Order("sort_order ASC, id ASC").Find(&levels).Error; err != nil {
+	if err := q.Order("sort_order ASC, id ASC").Find(&levels).Error; err != nil {
 		fail(c, 500, "ดึงข้อมูล level ไม่สำเร็จ")
 		return
 	}
 
-	// ⭐ นับจำนวนสมาชิกในแต่ละ level (LEFT JOIN members.level_id)
-	// ใช้ raw query เพราะ GORM subquery ซับซ้อน
+	// นับสมาชิกแต่ละ level (เฉพาะ active + ใน scope)
 	type lvlCount struct {
 		LevelID int64 `gorm:"column:level_id"`
-		Count   int64 `gorm:"column:cnt"`
+		Cnt     int64 `gorm:"column:cnt"`
 	}
 	var counts []lvlCount
-	h.DB.Raw(`
-		SELECT COALESCE(m.level_id, 0) as level_id, COUNT(*) as cnt
-		FROM members m
-		WHERE m.status = 'active'
-		GROUP BY m.level_id
-	`).Scan(&counts)
-
-	// map level_id → count สำหรับ lookup เร็วๆ
-	countMap := make(map[int64]int64)
-	for _, c := range counts {
-		countMap[c.LevelID] = c.Count
+	cntQ := h.DB.Table("members").
+		Select("COALESCE(level_id, 0) as level_id, COUNT(*) as cnt").
+		Where("status = ?", "active").
+		Group("level_id")
+	if scope.IsNode {
+		cntQ = cntQ.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		cntQ = cntQ.Where("agent_node_id = ?", scope.RootNodeID)
 	}
+	cntQ.Scan(&counts)
 
-	// ใส่ member_count ให้แต่ละ level
+	countMap := make(map[int64]int64)
+	for _, cc := range counts {
+		countMap[cc.LevelID] = cc.Cnt
+	}
 	for i := range levels {
 		levels[i].MemberCount = countMap[levels[i].ID]
 	}
 
-	ok(c, levels)
+	// ⭐ unassigned = สมาชิกที่ยังไม่มี level (level_id IS NULL)
+	// ส่งกลับแยก field เพื่อให้ admin-web โชว์ใน distribution chart
+	unassigned := countMap[0]
+
+	ok(c, gin.H{
+		"levels":     levels,
+		"unassigned": unassigned, // สมาชิกที่ยังไม่ได้ assign level
+	})
 }
 
 // =============================================================================
 // CreateMemberLevel — POST /api/v1/member-levels
-// สร้าง level ใหม่ พร้อมเงื่อนไข + ผลประโยชน์
 // =============================================================================
 func (h *Handler) CreateMemberLevel(c *gin.Context) {
-	// ⭐ ดึง scope — ใช�� SettingNodeID() เพื่อ set agent_node_id ตอน INSERT
 	scope := mw.GetNodeScope(c, h.DB)
 
 	var req struct {
-		Name           string  `json:"name" binding:"required,min=1,max=50"`
-		Color          string  `json:"color" binding:"required"`        // hex color เช่น "#FFD700"
-		Icon           string  `json:"icon"`                            // optional Lucide icon name
-		SortOrder      int     `json:"sort_order"`                      // ลำดับแสดง
-		MinDeposit     float64 `json:"min_deposit"`                     // ยอดฝากขั้นต่ำ
-		MinBets        int     `json:"min_bets"`                        // จำนวน bet ขั้นต่ำ
-		CommissionRate float64 `json:"commission_rate"`                  // ค่าคอม %
-		CashbackRate   float64 `json:"cashback_rate"`                   // คืนยอดเสีย %
-		BonusPct       float64 `json:"bonus_pct"`                       // โบนัส %
-		MaxWithdrawDay float64 `json:"max_withdraw_day"`                // ถอนสูงสุด/วัน
-		Description    string  `json:"description"`                     // คำอธิบาย
+		Name          string  `json:"name" binding:"required,min=1,max=50"`
+		Color         string  `json:"color" binding:"required"`
+		Icon          string  `json:"icon"`
+		SortOrder     int     `json:"sort_order"`
+		MinDeposit30d float64 `json:"min_deposit_30d"`
+		Description   string  `json:"description"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error())
 		return
 	}
 
-	// ⭐ ตรวจชื่อซ้ำในระบบเดียวกัน (agent_id = 1)
-	// ⭐ scope ตามสายงาน — ตรวจชื่อซ้ำเฉพาะใน scope ของ node/admin
+	// เช็คชื่อซ้ำใน scope
 	var exists int64
-	dupeQuery := h.DB.Table("member_levels").Where("agent_id = 1 AND name = ?", req.Name)
+	dq := h.DB.Table("member_levels").Where("name = ?", req.Name)
 	if scope.IsNode {
-		dupeQuery = dupeQuery.Where("agent_node_id = ?", scope.NodeID)
+		dq = dq.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		dupeQuery = dupeQuery.Where("agent_node_id IS NULL")
+		dq = dq.Where("agent_node_id = ?", scope.RootNodeID)
 	}
-	dupeQuery.Count(&exists)
+	dq.Count(&exists)
 	if exists > 0 {
 		fail(c, 400, "ชื่อ level \""+req.Name+"\" มีอยู่แล้ว")
 		return
 	}
 
-	level := memberLevel{
-		AgentID:        1,
-		AgentNodeID:    scope.SettingNodeID(), // ⭐ admin=nil (ระบบกลาง), node=&nodeID (เฉพาะ node)
-		Name:           req.Name,
-		Color:          req.Color,
-		Icon:           req.Icon,
-		SortOrder:      req.SortOrder,
-		MinDeposit:     req.MinDeposit,
-		MinBets:        req.MinBets,
-		CommissionRate: req.CommissionRate,
-		CashbackRate:   req.CashbackRate,
-		BonusPct:       req.BonusPct,
-		MaxWithdrawDay: req.MaxWithdrawDay,
-		Description:    req.Description,
-		Status:         "active",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+	lvl := memberLevel{
+		AgentNodeID:   scope.SettingNodeID(),
+		Name:          req.Name,
+		Color:         req.Color,
+		Icon:          req.Icon,
+		SortOrder:     req.SortOrder,
+		MinDeposit30d: req.MinDeposit30d,
+		Description:   req.Description,
+		Status:        "active",
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
-
-	if err := h.DB.Create(&level).Error; err != nil {
+	if err := h.DB.Create(&lvl).Error; err != nil {
 		fail(c, 500, "สร้าง level ไม่สำเร็จ: "+err.Error())
 		return
 	}
-
-	ok(c, level)
+	ok(c, lvl)
 }
 
 // =============================================================================
 // UpdateMemberLevel — PUT /api/v1/member-levels/:id
-// แก้ไข level — อัพเดทเฉพาะ fields ที่ส่งมา
 // =============================================================================
 func (h *Handler) UpdateMemberLevel(c *gin.Context) {
-	// ⭐ ดึง scope — ใช้ filter WHERE เพื่อป้องกัน node แก้ข้อมูลของ node อื่น
 	scope := mw.GetNodeScope(c, h.DB)
-
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var req struct {
-		Name           *string  `json:"name"`
-		Color          *string  `json:"color"`
-		Icon           *string  `json:"icon"`
-		SortOrder      *int     `json:"sort_order"`
-		MinDeposit     *float64 `json:"min_deposit"`
-		MinBets        *int     `json:"min_bets"`
-		CommissionRate *float64 `json:"commission_rate"`
-		CashbackRate   *float64 `json:"cashback_rate"`
-		BonusPct       *float64 `json:"bonus_pct"`
-		MaxWithdrawDay *float64 `json:"max_withdraw_day"`
-		Description    *string  `json:"description"`
-		Status         *string  `json:"status"`
+		Name          *string  `json:"name"`
+		Color         *string  `json:"color"`
+		Icon          *string  `json:"icon"`
+		SortOrder     *int     `json:"sort_order"`
+		MinDeposit30d *float64 `json:"min_deposit_30d"`
+		Description   *string  `json:"description"`
+		Status        *string  `json:"status"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error())
 		return
 	}
 
-	// ⭐ สร้าง map เฉพาะ fields ที่ส่งมา (partial update)
 	updates := map[string]interface{}{}
 	if req.Name != nil {
 		updates["name"] = *req.Name
@@ -221,23 +227,8 @@ func (h *Handler) UpdateMemberLevel(c *gin.Context) {
 	if req.SortOrder != nil {
 		updates["sort_order"] = *req.SortOrder
 	}
-	if req.MinDeposit != nil {
-		updates["min_deposit"] = *req.MinDeposit
-	}
-	if req.MinBets != nil {
-		updates["min_bets"] = *req.MinBets
-	}
-	if req.CommissionRate != nil {
-		updates["commission_rate"] = *req.CommissionRate
-	}
-	if req.CashbackRate != nil {
-		updates["cashback_rate"] = *req.CashbackRate
-	}
-	if req.BonusPct != nil {
-		updates["bonus_pct"] = *req.BonusPct
-	}
-	if req.MaxWithdrawDay != nil {
-		updates["max_withdraw_day"] = *req.MaxWithdrawDay
+	if req.MinDeposit30d != nil {
+		updates["min_deposit_30d"] = *req.MinDeposit30d
 	}
 	if req.Description != nil {
 		updates["description"] = *req.Description
@@ -245,74 +236,60 @@ func (h *Handler) UpdateMemberLevel(c *gin.Context) {
 	if req.Status != nil {
 		updates["status"] = *req.Status
 	}
-
 	if len(updates) == 0 {
 		fail(c, 400, "ไม่มีข้อมูลให้อัพเดท")
 		return
 	}
-
 	updates["updated_at"] = time.Now()
 
-	// ⭐ scope ตามสายงาน: node แก้ได้เฉพาะ level ของตัวเอง
-	query := h.DB.Table("member_levels").Where("id = ? AND agent_id = 1", id)
+	q := h.DB.Table("member_levels").Where("id = ?", id)
 	if scope.IsNode {
-		query = query.Where("agent_node_id = ?", scope.NodeID)
+		q = q.Where("agent_node_id = ?", scope.NodeID)
 	}
-	result := query.Updates(updates)
-	if result.RowsAffected == 0 {
+	res := q.Updates(updates)
+	if res.RowsAffected == 0 {
 		fail(c, 404, "ไม่พบ level นี้หรือไม่มีสิทธิ์แก้ไข")
 		return
 	}
-
-	// ดึง level ที่อัพเดทแล้ว ส่งกลับ
-	var level memberLevel
-	h.DB.First(&level, id)
-	ok(c, level)
+	var lvl memberLevel
+	h.DB.First(&lvl, id)
+	ok(c, lvl)
 }
 
 // =============================================================================
 // DeleteMemberLevel — DELETE /api/v1/member-levels/:id
-// ลบ level — ต้องไม่มีสมาชิกอยู่ใน level นี้
+// ⭐ ต้องไม่มีสมาชิกอยู่ใน level นี้ (safety)
 // =============================================================================
 func (h *Handler) DeleteMemberLevel(c *gin.Context) {
-	// ⭐ ดึง scope — ป้องกัน node ลบข้อมูลของ node อื่น
 	scope := mw.GetNodeScope(c, h.DB)
-
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
-	// ⭐ ตรวจว่ามีสมาชิกอยู่ใน level นี้หรือไม่
-	var memberCount int64
-	h.DB.Table("members").Where("level_id = ?", id).Count(&memberCount)
-	if memberCount > 0 {
-		fail(c, 400, "ไม่สามารถลบได้ — มีสมาชิก "+strconv.FormatInt(memberCount, 10)+" คนอยู่ใน level นี้")
+	var cnt int64
+	h.DB.Table("members").Where("level_id = ?", id).Count(&cnt)
+	if cnt > 0 {
+		fail(c, 400, "ไม่สามารถลบได้ — มีสมาชิก "+strconv.FormatInt(cnt, 10)+" คนอยู่ใน level นี้")
 		return
 	}
 
-	// ⭐ scope ตามสายงาน: node ลบได้เฉพาะ level ของตัวเอง
-	delQuery := "DELETE FROM member_levels WHERE id = ? AND agent_id = 1"
-	delArgs := []interface{}{id}
+	q := "DELETE FROM member_levels WHERE id = ?"
+	args := []interface{}{id}
 	if scope.IsNode {
-		delQuery += " AND agent_node_id = ?"
-		delArgs = append(delArgs, scope.NodeID)
+		q += " AND agent_node_id = ?"
+		args = append(args, scope.NodeID)
 	}
-	result := h.DB.Exec(delQuery, delArgs...)
-	if result.RowsAffected == 0 {
+	res := h.DB.Exec(q, args...)
+	if res.RowsAffected == 0 {
 		fail(c, 404, "ไม่พบ level นี้หรือไม่มีสิทธิ์ลบ")
 		return
 	}
-
 	ok(c, gin.H{"id": id, "deleted": true})
 }
 
 // =============================================================================
 // ReorderMemberLevels — PUT /api/v1/member-levels/reorder
-// จัดลำดับ levels ใหม่ (drag & drop)
-// ⭐ รับ array ของ {id, sort_order} → อัพเดท sort_order ทีเดียว
 // =============================================================================
 func (h *Handler) ReorderMemberLevels(c *gin.Context) {
-	// ⭐ ดึง scope — ป้องกัน node จัดลำดับข้อมูลของ node อื่น
 	scope := mw.GetNodeScope(c, h.DB)
-
 	var req struct {
 		Orders []struct {
 			ID        int64 `json:"id" binding:"required"`
@@ -323,18 +300,165 @@ func (h *Handler) ReorderMemberLevels(c *gin.Context) {
 		fail(c, 400, err.Error())
 		return
 	}
-
-	// ⭐ อัพเดททีละ row (ใน transaction เดียว)
-	// ⭐ scope ตามสายงาน: node อัพเดทได้เฉพาะของตัวเอง
 	tx := h.DB.Begin()
 	for _, o := range req.Orders {
 		if scope.IsNode {
-			tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_id = 1 AND agent_node_id = ?", o.SortOrder, o.ID, scope.NodeID)
+			tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_node_id = ?", o.SortOrder, o.ID, scope.NodeID)
 		} else {
-			tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_id = 1", o.SortOrder, o.ID)
+			tx.Exec("UPDATE member_levels SET sort_order = ? WHERE id = ? AND agent_node_id = ?", o.SortOrder, o.ID, scope.RootNodeID)
 		}
 	}
 	tx.Commit()
-
 	ok(c, gin.H{"updated": len(req.Orders)})
+}
+
+// =============================================================================
+// OverrideMemberLevel — PUT /api/v1/members/:id/level
+// ⭐ admin override: เปลี่ยน level + lock (cron daily จะไม่แก้ต่อ)
+// ⭐ บันทึก history reason=admin_override
+// =============================================================================
+func (h *Handler) OverrideMemberLevel(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
+	memberID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	var req struct {
+		LevelID *int64 `json:"level_id"` // NULL = ตกระดับทั้งหมด (ไม่เข้า tier ใด)
+		Note    string `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+
+	// เช็ค member อยู่ใน scope ของ admin (ป้องกันข้าม node)
+	type memRow struct {
+		ID              int64
+		LevelID         *int64
+		Deposit30dCached float64 `gorm:"column:deposit_30d_cached"`
+		AgentNodeID     int64
+	}
+	var mem memRow
+	mq := h.DB.Table("members").Where("id = ?", memberID)
+	if scope.IsNode {
+		mq = mq.Where("agent_node_id = ?", scope.NodeID)
+	}
+	if err := mq.Select("id, level_id, deposit_30d_cached, agent_node_id").Take(&mem).Error; err != nil {
+		fail(c, 404, "ไม่พบสมาชิกนี้หรือไม่มีสิทธิ์")
+		return
+	}
+
+	// ถ้าระบุ level_id → เช็คว่า level นั้นอยู่ใน scope เดียวกัน
+	if req.LevelID != nil {
+		var ok64 int64
+		h.DB.Table("member_levels").Where("id = ? AND agent_node_id = ?", *req.LevelID, mem.AgentNodeID).Count(&ok64)
+		if ok64 == 0 {
+			fail(c, 400, "level_id นี้ไม่อยู่ใน scope ของสมาชิก")
+			return
+		}
+	}
+
+	adminIDPtr := getAdminIDPtr(c)
+	now := time.Now()
+
+	// transaction: update member + insert history
+	tx := h.DB.Begin()
+	if err := tx.Exec(`
+		UPDATE members
+		SET level_id = ?, level_locked = 1, level_updated_at = ?, updated_at = ?
+		WHERE id = ?
+	`, req.LevelID, now, now, memberID).Error; err != nil {
+		tx.Rollback()
+		fail(c, 500, "update member ล้มเหลว: "+err.Error())
+		return
+	}
+	hist := memberLevelHistory{
+		MemberID:           memberID,
+		FromLevelID:        mem.LevelID,
+		ToLevelID:          req.LevelID,
+		Reason:             "admin_override",
+		Deposit30dSnapshot: mem.Deposit30dCached,
+		ChangedByAdminID:   adminIDPtr,
+		Note:               req.Note,
+		CreatedAt:          now,
+	}
+	if err := tx.Create(&hist).Error; err != nil {
+		tx.Rollback()
+		fail(c, 500, "insert history ล้มเหลว: "+err.Error())
+		return
+	}
+	tx.Commit()
+
+	ok(c, gin.H{"member_id": memberID, "level_id": req.LevelID, "locked": true})
+}
+
+// =============================================================================
+// UnlockMemberLevel — DELETE /api/v1/members/:id/level-lock
+// ⭐ ยกเลิก lock — cron ครั้งถัดไปจะคำนวณใหม่จาก deposit 30d
+// =============================================================================
+func (h *Handler) UnlockMemberLevel(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
+	memberID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	adminIDPtr := getAdminIDPtr(c)
+	now := time.Now()
+
+	// เช็ค + update ใน scope
+	q := "UPDATE members SET level_locked = 0, updated_at = ? WHERE id = ? AND level_locked = 1"
+	args := []interface{}{now, memberID}
+	if scope.IsNode {
+		q += " AND agent_node_id = ?"
+		args = append(args, scope.NodeID)
+	}
+	res := h.DB.Exec(q, args...)
+	if res.RowsAffected == 0 {
+		fail(c, 404, "ไม่พบสมาชิก หรือไม่ได้ถูก lock อยู่")
+		return
+	}
+
+	// log history (reason=admin_unlock)
+	var curLv *int64
+	var snap float64
+	h.DB.Table("members").Where("id = ?", memberID).Select("level_id").Scan(&curLv)
+	h.DB.Table("members").Where("id = ?", memberID).Select("deposit_30d_cached").Scan(&snap)
+	h.DB.Create(&memberLevelHistory{
+		MemberID:           memberID,
+		FromLevelID:        curLv,
+		ToLevelID:          curLv,
+		Reason:             "admin_unlock",
+		Deposit30dSnapshot: snap,
+		ChangedByAdminID:   adminIDPtr,
+		CreatedAt:          now,
+	})
+
+	ok(c, gin.H{"member_id": memberID, "locked": false})
+}
+
+// =============================================================================
+// GetMemberLevelHistory — GET /api/v1/members/:id/level-history
+// ⭐ ประวัติการเปลี่ยนระดับของสมาชิก (auto + admin)
+// =============================================================================
+func (h *Handler) GetMemberLevelHistory(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
+	memberID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	// เช็ค member อยู่ใน scope
+	mq := h.DB.Table("members").Where("id = ?", memberID)
+	if scope.IsNode {
+		mq = mq.Where("agent_node_id = ?", scope.NodeID)
+	}
+	var cnt int64
+	mq.Count(&cnt)
+	if cnt == 0 {
+		fail(c, 404, "ไม่พบสมาชิก")
+		return
+	}
+
+	var hist []memberLevelHistory
+	h.DB.Table("member_level_history").
+		Where("member_id = ?", memberID).
+		Order("created_at DESC").
+		Limit(100).
+		Find(&hist)
+
+	ok(c, hist)
 }

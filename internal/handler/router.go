@@ -51,6 +51,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	"github.com/farritpcz/lotto-standalone-admin-api/internal/cloudflare"
 	mw "github.com/farritpcz/lotto-standalone-admin-api/internal/middleware"
 )
 
@@ -68,6 +69,7 @@ type Handler struct {
 	R2                  interface{}      // *storage.R2Client (nil = local fallback)
 	RoundService        interface{}      // *service.RoundService — ⭐ centralized round management
 	Config              *DeployHandlerConfig // ⭐ config สำหรับ deploy เว็บใหม่
+	CFClient            *cloudflare.Client   // ⭐ Cloudflare API client (nil = ไม่สร้าง zone อัตโนมัติ)
 }
 
 // DeployHandlerConfig config ย่อยสำหรับ Handler (ไม่ import config package เพื่อหลีกเลี่ยง circular)
@@ -126,8 +128,10 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 			protected.PUT("/rounds/:id/void", mw.RequirePermission(h.DB, "lottery.create"), h.VoidRound)
 			protected.GET("/rounds/schedules", mw.RequirePermission(h.DB, "lottery.view"), h.ListSchedules)
 
-			// Results — ดูผลรางวัล (อ่านอย่างเดียว)
+			// Results — ดูผลรางวัล + กรอกผล
 			protected.GET("/results", mw.RequirePermission(h.DB, "lottery.view"), h.ListResults)
+			protected.POST("/results/:roundId", mw.RequirePermission(h.DB, "lottery.create"), h.SubmitResult)
+			protected.POST("/results/:roundId/preview", mw.RequirePermission(h.DB, "lottery.create"), h.PreviewResult)
 
 			// Number Bans — ⭐ permission: lottery.bans
 			protected.GET("/bans", mw.RequirePermission(h.DB, "lottery.bans"), h.ListBans)
@@ -224,6 +228,10 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				memberLevels.PUT("/:id", h.UpdateMemberLevel)
 				memberLevels.DELETE("/:id", h.DeleteMemberLevel)
 			}
+			// Per-member level override/history — ⭐ permission: members.edit
+			protected.PUT("/members/:id/level", mw.RequirePermission(h.DB, "members.edit"), h.OverrideMemberLevel)         // set + lock
+			protected.DELETE("/members/:id/level-lock", mw.RequirePermission(h.DB, "members.edit"), h.UnlockMemberLevel)   // ปล่อย lock ให้ cron คำนวณต่อ
+			protected.GET("/members/:id/level-history", mw.RequirePermission(h.DB, "members.view"), h.GetMemberLevelHistory)
 
 			// Promotions — ⭐ permission: system.cms
 			promos := protected.Group("/promotions")
@@ -317,6 +325,8 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 				// Profit Reports — รายงานกำไร
 				downline.GET("/profits", h.GetDownlineProfits)
 				downline.GET("/profits/:nodeId", h.GetNodeProfits)
+				// ⭐ รายงานเคลียสายงาน (เว็บตัวเอง + ใต้สาย + สรุป)
+				downline.GET("/report", h.GetDownlineReport)
 			}
 
 			// ⭐ EasySlip — ตั้งค่าระบบตรวจสลิปอัตโนมัติ
