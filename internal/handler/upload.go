@@ -104,7 +104,43 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 	// =================================================================
 	// [4] Upload ไป R2
+	//
+	// ⭐ Banner folder: สร้าง 3 ขนาด (sm 640, md 1280, lg 1920) สำหรับ srcset
+	//    ส่วน folder อื่น: upload ขนาดเดียว (เดิม)
 	// =================================================================
+	if folder == "banner" {
+		// ดึง kind กลับมา (validator decoded แล้ว แต่ไม่ส่ง kind กลับ → detect อีกรอบ)
+		kind, kErr := storage.DetectImageKind(safeData)
+		if kErr != nil {
+			fail(c, 500, "re-detect kind failed: "+kErr.Error())
+			return
+		}
+		variants, vContentType, vExt, genErr := storage.GenerateBannerVariants(safeData, kind)
+		if genErr != nil {
+			fail(c, 500, "generate variants failed: "+genErr.Error())
+			return
+		}
+		urls, upErr := r2.UploadVariants(folder, vContentType, vExt, variants)
+		if upErr != nil {
+			fail(c, 500, "R2 upload failed: "+upErr.Error())
+			return
+		}
+		// ⭐ ใช้ _lg เป็น URL หลัก (backward compat) — frontend ถอด suffix เพื่อ build srcset
+		mainURL := urls["lg"]
+		if mainURL == "" {
+			mainURL = urls["md"]
+		}
+		ok2(c, gin.H{
+			"url":      mainURL,
+			"variants": urls, // {sm, md, lg}
+			"storage":  "r2",
+			"folder":   folder,
+			"type":     vContentType,
+		})
+		return
+	}
+
+	// ───── Non-banner: upload ขนาดเดียว (เดิม) ─────
 	publicURL, err := r2.Upload(folder, "upload"+ext, contentType, bytes.NewReader(safeData))
 	if err != nil {
 		fail(c, 500, "R2 upload failed: "+err.Error())

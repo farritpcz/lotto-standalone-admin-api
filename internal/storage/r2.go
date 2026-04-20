@@ -11,6 +11,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -92,6 +93,40 @@ func (r *R2Client) Upload(folder, filename, contentType string, body io.Reader) 
 	publicURL := fmt.Sprintf("%s/%s", r.publicURL, key)
 	log.Printf("[R2] Uploaded: %s → %s", filename, publicURL)
 	return publicURL, nil
+}
+
+// UploadVariants — upload หลายขนาดของภาพเดียวกัน (shared UUID)
+//
+// variants: array จาก GenerateBannerVariants
+// folder: "banner"
+// contentType: "image/jpeg" หรือ "image/png"
+// ext: ".jpg" หรือ ".png"
+//
+// Naming: {folder}/{uuid}_{ts}_{variant}{ext}
+// เช่น banner/abc123_1712345_sm.jpg, banner/abc123_1712345_md.jpg, banner/abc123_1712345_lg.jpg
+//
+// Returns: map[variantName]publicURL (เช่น {"sm": "...", "md": "...", "lg": "..."})
+func (r *R2Client) UploadVariants(folder, contentType, ext string, variants []ImageVariant) (map[string]string, error) {
+	// สร้าง shared UUID + timestamp สำหรับทุก variant
+	baseID := uuid.New().String()[:12]
+	ts := time.Now().Unix()
+
+	result := make(map[string]string, len(variants))
+	for _, v := range variants {
+		key := fmt.Sprintf("%s/%s_%d_%s%s", folder, baseID, ts, v.Name, ext)
+		_, err := r.client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket:      aws.String(r.bucket),
+			Key:         aws.String(key),
+			Body:        bytes.NewReader(v.Data),
+			ContentType: aws.String(contentType),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("R2 upload variant %s failed: %w", v.Name, err)
+		}
+		result[v.Name] = fmt.Sprintf("%s/%s", r.publicURL, key)
+		log.Printf("[R2] Uploaded variant: %s (%d bytes) → %s", v.Name, len(v.Data), result[v.Name])
+	}
+	return result, nil
 }
 
 // Delete ลบไฟล์จาก R2
