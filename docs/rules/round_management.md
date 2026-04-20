@@ -22,7 +22,16 @@
    - goroutine: `CalculateCommissions` + `CalculateDownlineProfits`
 8. Preview ไม่บันทึกอะไร — แค่คำนวณใครถูก เท่าไรกลับไป frontend
 9. Permission ต้องมี `lottery.create` สำหรับ mutating (open/close/void/result), `lottery.view` สำหรับ GET
-10. `ListSchedules` คืน `job.GetDefaultSchedules()` — ตารางสร้างรอบอัตโนมัติ
+10. `ListSchedules` คืน `job.GetDefaultSchedules(db)` — ตารางสร้างรอบอัตโนมัติ (อ่านจาก DB ตั้งแต่ migration 025)
+
+### ⭐ Auto-Create Rounds (since 2026-04-20)
+11. Cron `StartRoundLifecycleJob` สร้างรอบล่วงหน้า **30 วัน** ทุก 1 ชม. (เดิม 7 วัน)
+12. อ่าน schedule จาก `lottery_types.schedule_config` JSON — ไม่ hard-code ใน Go
+13. Schema JSON: `{"day_type": "daily|weekday|thai_gov", "open_time": "HH:MM", "close_time": "HH:MM"}`
+14. `schedule_config = NULL` (เช่น YEEKEE) → **ข้าม** ไม่ auto-create (ยี่กีใช้ cron แยกที่ member-api)
+15. agent_node_id = NULL (global — ทุก agent ใช้รอบเดียวกัน) ตามกฏ `lotto-core/docs/rules/multi_agent_scoping.md`
+16. Unique: `(lottery_type_id, round_number)` → re-run cron ซ้ำได้ (duplicate ถูก skip)
+17. `close_time < open_time` → ปิดข้ามวัน (บวก 1 วันให้ close_time) — ใช้กับ DJ 20:30→03:00
 
 ## 🔄 Flow (submit result)
 ```
@@ -63,3 +72,4 @@ POST /api/v1/results/:roundId  { top3, top2, bottom2, front3?, bottom3? }
 
 ## 📝 Change Log
 - 2026-04-20: Initial — สรุป lifecycle, validation SubmitResult, settle flow ผ่าน lotto-core
+- 2026-04-20: Auto-create refactor — ย้าย schedule hard-code → `lottery_types.schedule_config` (migration 025), window 7→30 วัน, `GetDefaultSchedules(db)` อ่าน DB

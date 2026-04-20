@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -100,9 +101,11 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 		// ถ้ามี agent_node_id → login เป็น node user (เห็นเฉพาะข้อมูลเว็บนั้น)
 		// ถ้าไม่มี (NULL) → login เป็น admin ปกติ (เห็นทุกอย่าง)
 		if admin.AgentNodeID != nil {
-			// ⭐ พนักงานของเว็บ → สร้าง token ด้วย role="node" + AdminID = nodeID
+			// ⭐ พนักงานของเว็บ → สร้าง token ด้วย role จริง (operator/viewer) + AdminID ยังเป็น admin.ID
+			// แต่ set flag เป็น "node" ใน user_type เพื่อให้ NodeScope รู้ว่าต้อง scope ข้อมูล
 			nodeID := *admin.AgentNodeID
-			token, err := middleware.GenerateAdminToken(nodeID, admin.Username, "node", h.AdminJWTSecret, h.AdminJWTExpiryHours)
+			// ใช้ role="node" เพื่อให้ NodeScope ทำงาน แต่เก็บ role จริงไว้ใน context ด้วย
+			token, err := middleware.GenerateAdminToken(admin.ID, admin.Username, "node", h.AdminJWTSecret, h.AdminJWTExpiryHours)
 			if err != nil {
 				fail(c, 500, "failed to generate token"); return
 			}
@@ -140,7 +143,7 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 	}
 
 	// สร้าง node_token + admin_token (role="node") เพื่อเข้า admin panel ได้
-	nodeToken, _ := middleware.GenerateNodeToken(node.ID, node.AgentID, node.Username, node.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
+	nodeToken, _ := middleware.GenerateNodeToken(node.ID, node.RootNodeID(), node.Username, node.Role, h.AdminJWTSecret, h.AdminJWTExpiryHours)
 	adminToken, _ := middleware.GenerateAdminToken(node.ID, node.Username, "node", h.AdminJWTSecret, h.AdminJWTExpiryHours)
 
 	maxAge := h.AdminJWTExpiryHours * 3600
@@ -568,13 +571,18 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	if err := h.DB.First(&member, id).Error; err != nil { fail(c, 404, "member not found"); return }
 	if !scope.HasMember(id) { fail(c, 403, "ไม่มีสิทธิ์"); return } // ⭐
 	var req struct {
-		Phone    string `json:"phone"`
-		Email    string `json:"email"`
-		Password string `json:"password"` // ⭐ admin reset password
+		Phone       string `json:"phone"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`      // ⭐ admin reset password
+		AgentNodeID *int64 `json:"agent_node_id"`  // ⭐ ย้ายสมาชิกไป node อื่น
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 	if req.Phone != "" { member.Phone = req.Phone }
 	if req.Email != "" { member.Email = req.Email }
+	// ⭐ ย้ายสมาชิกไป node อื่น
+	if req.AgentNodeID != nil {
+		member.AgentNodeID = req.AgentNodeID
+	}
 	// ⭐ รีเซ็ตรหัสผ่าน (ถ้าส่งมา)
 	if req.Password != "" {
 		if len(req.Password) < 6 {
@@ -621,7 +629,7 @@ func (h *Handler) AdjustMemberBalance(c *gin.Context) {
 	// สร้าง transaction record
 	txType := "admin_credit"
 	if req.Amount < 0 { txType = "admin_debit" }
-	tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+	tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
 		VALUES (1, ?, ?, ?, ?, ?, 'admin_adjust', ?, ?)`,
 		id, txType, req.Amount, member.Balance, member.Balance+req.Amount, req.Note, now)
 
@@ -841,7 +849,7 @@ func (h *Handler) VoidRound(c *gin.Context) {
 // ListSchedules แสดงตาราง schedule สร้างรอบอัตโนมัติ
 // GET /api/v1/rounds/schedules
 func (h *Handler) ListSchedules(c *gin.Context) {
-	ok(c, job.GetDefaultSchedules())
+	ok(c, job.GetDefaultSchedules(h.DB))
 }
 
 // getRoundService ดึง RoundService จาก Handler (type assertion)
@@ -1272,20 +1280,54 @@ func (h *Handler) DeleteBan(c *gin.Context) {
 // =============================================================================
 
 func (h *Handler) ListRates(c *gin.Context) {
-	// ⭐ ดึง scope — node เห็นเฉพาะ pay rates ของตัวเอง, admin เห็นของระบบกลาง
+	// ⭐ ดึง scope — ใช้หลัก NULL = default, agent_node_id = override
 	scope := mw.GetNodeScope(c, h.DB)
 
-	var rates []model.PayRate
-	query := h.DB.Preload("BetType").Preload("LotteryType").Where("status = ?", "active")
-	// ⭐ scope: node เห็นเฉพาะ rates ของตัวเอง, admin เห็นของระบบ (agent_node_id IS NULL)
+	// หา node ID สำหรับ filter override
+	var nodeID int64
 	if scope.IsNode {
-		query = query.Where("agent_node_id = ?", scope.NodeID)
+		nodeID = scope.NodeID
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		nodeID = scope.RootNodeID
 	}
+
+	// ⭐ ดึง default (NULL) + override ของเว็บนี้
+	// ถ้าเว็บมี override สำหรับ lottery_type + bet_type → แสดง override
+	// ถ้าไม่มี → แสดง default (NULL)
+	var rates []model.PayRate
+	query := h.DB.Preload("BetType").Preload("LotteryType").
+		Where("status = ?", "active").
+		Where("agent_node_id IS NULL OR agent_node_id = ?", nodeID)
 	if lt := c.Query("lottery_type_id"); lt != "" { query = query.Where("lottery_type_id = ?", lt) }
 	query.Find(&rates)
-	ok(c, rates)
+
+	// ⭐ Merge: ถ้ามี override (agent_node_id != nil) ใช้แทน default
+	// สร้าง map key = "lotteryTypeID-betTypeID"
+	merged := make(map[string]model.PayRate)
+	for _, r := range rates {
+		key := strconv.FormatInt(r.LotteryTypeID, 10) + "-" + strconv.FormatInt(r.BetTypeID, 10)
+		existing, exists := merged[key]
+		if !exists {
+			merged[key] = r
+		} else {
+			// ถ้า r เป็น override (มี agent_node_id) → ใช้แทน default
+			if r.AgentNodeID != nil {
+				merged[key] = r
+			} else if existing.AgentNodeID == nil {
+				// ทั้งคู่เป็น default → ใช้ตัวแรก
+			}
+		}
+	}
+
+	// แปลง map กลับเป็น slice แล้วเรียงตาม BetType.SortOrder
+	result := make([]model.PayRate, 0, len(merged))
+	for _, r := range merged {
+		result = append(result, r)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].BetType.SortOrder < result[j].BetType.SortOrder
+	})
+	ok(c, result)
 }
 
 func (h *Handler) UpdateRate(c *gin.Context) {
@@ -1525,7 +1567,7 @@ func (h *Handler) CancelBill(c *gin.Context) {
 			}
 			var bal float64
 			tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&bal)
-			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
 				VALUES (1, ?, 'admin_debit', ?, ?, ?, 'bill_void_debit', ?, ?)`,
 				memberID, -totalDebit, bal+totalDebit, bal, "หักรางวัลคืน (void bill "+batchID[:8]+"): "+req.Reason, now)
 		}
@@ -1535,14 +1577,14 @@ func (h *Handler) CancelBill(c *gin.Context) {
 			tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", totalRefund, memberID)
 			var bal float64
 			tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&bal)
-			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+			tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
 				VALUES (1, ?, 'refund', ?, ?, ?, 'bill_cancel', ?, ?)`,
 				memberID, totalRefund, bal-totalRefund, bal, "คืนเงินบิล "+batchID[:8]+": "+req.Reason, now)
 		}
 	} else {
 		var balance float64
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
+		tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_type, note, created_at)
 			VALUES (1, ?, 'admin_debit', 0, ?, ?, 'bill_cancel_no_refund', ?, ?)`,
 			memberID, balance, balance, "ยกเลิกบิล "+batchID[:8]+" (ไม่คืนเครดิต): "+req.Reason, now)
 	}
@@ -1623,7 +1665,7 @@ func (h *Handler) CancelBet(c *gin.Context) {
 			var balAfterDebit float64
 			tx.Table("members").Select("balance").Where("id = ?", bet.MemberID).Row().Scan(&balAfterDebit)
 
-			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 				VALUES (1, ?, 'admin_debit', ?, ?, ?, ?, 'bet_void_debit', ?, ?)`,
 				bet.MemberID, -debitAmount, balAfterDebit+debitAmount, balAfterDebit, id,
 				"หักรางวัลคืน (void bet #"+strconv.FormatInt(id, 10)+")", now)
@@ -1636,7 +1678,7 @@ func (h *Handler) CancelBet(c *gin.Context) {
 			var balAfter float64
 			tx.Table("members").Select("balance").Where("id = ?", bet.MemberID).Row().Scan(&balAfter)
 
-			tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+			tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 				VALUES (1, ?, 'refund', ?, ?, ?, ?, 'bet_cancel', ?, ?)`,
 				bet.MemberID, refundAmount, balAfter-refundAmount, balAfter, id,
 				"คืนเงินเดิมพัน #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
@@ -1646,7 +1688,7 @@ func (h *Handler) CancelBet(c *gin.Context) {
 		var balance float64
 		tx.Table("members").Select("balance").Where("id = ?", bet.MemberID).Row().Scan(&balance)
 
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+		tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 			VALUES (1, ?, 'admin_debit', 0, ?, ?, ?, 'bet_cancel_no_refund', ?, ?)`,
 			bet.MemberID, balance, balance, id,
 			"ยกเลิกเดิมพัน #"+strconv.FormatInt(id, 10)+" (ไม่คืนเครดิต): "+req.Reason, now)
@@ -1756,8 +1798,8 @@ func (h *Handler) GetAgentTheme(c *gin.Context) {
 		ThemeVersion        int    `json:"theme_version"`
 	}
 	var theme ThemeRow
-	// ⭐ agent_id=1 สำหรับ standalone (multi-agent ใช้ jwt claims)
-	if err := h.DB.Table("agents").Where("id = 1").First(&theme).Error; err != nil {
+	// ⭐ ดึง theme จาก root node (agent_nodes) แทน agents table เดิม
+	if err := h.DB.Table("agent_nodes").Where("role = 'admin' AND parent_id IS NULL").First(&theme).Error; err != nil {
 		fail(c, 404, "agent not found"); return
 	}
 	ok(c, theme)
@@ -1800,7 +1842,8 @@ func (h *Handler) UpdateAgentTheme(c *gin.Context) {
 	}
 
 	// ⭐ Bump theme_version → หน้าบ้านเห็น version ไม่ตรง → refetch สีใหม่
-	if err := h.DB.Table("agents").Where("id = 1").
+	// ⭐ อัพเดท theme ใน root node (agent_nodes) แทน agents table เดิม
+	if err := h.DB.Table("agent_nodes").Where("role = 'admin' AND parent_id IS NULL").
 		Updates(updates).
 		Update("theme_version", gorm.Expr("theme_version + 1")).Error; err != nil {
 		fail(c, 500, err.Error()); return
@@ -1874,7 +1917,7 @@ func (h *Handler) GetAffiliateSettings(c *gin.Context) {
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	query.Order("lottery_type_id ASC").Find(&settings)
 	ok(c, settings)
@@ -1894,17 +1937,14 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
-	// หา agent_id จาก JWT (ใช้ default 1 สำหรับ standalone)
-	agentID := int64(1)
-
 	// ⭐ Upsert: หาทุก status (รวม inactive) — ป้องกัน duplicate
 	// scope ตามสายงาน: node หา/สร้างเฉพาะ settings ของตัวเอง
 	var existing model.AffiliateSettings
-	query := h.DB.Where("agent_id = ?", agentID)
+	query := h.DB
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	if req.LotteryTypeID == nil {
 		query = query.Where("lottery_type_id IS NULL")
@@ -1915,8 +1955,6 @@ func (h *Handler) UpsertAffiliateSetting(c *gin.Context) {
 	if err := query.First(&existing).Error; err != nil {
 		// ไม่มีเลย → สร้างใหม่
 		setting := model.AffiliateSettings{
-			AgentID:        agentID,
-			AgentNodeID:    scope.SettingNodeID(), // ⭐ admin=nil, node=&nodeID
 			LotteryTypeID:  req.LotteryTypeID,
 			CommissionRate: req.CommissionRate,
 			WithdrawalMin:  req.WithdrawalMin,
@@ -1992,14 +2030,13 @@ func (h *Handler) ListShareTemplates(c *gin.Context) {
 	// ⭐ ดึง scope — ถ้าเป็น node จะ filter เฉพาะข้อมูลของ node นั้น
 	scope := mw.GetNodeScope(c, h.DB)
 
-	agentID := int64(1)
 	var templates []model.ShareTemplate
-	query := h.DB.Where("agent_id = ?", agentID)
 	// ⭐ scope ตามสายงาน: node เห็นเฉพาะของตัวเอง, admin เห็นของระบบกลาง
+	query := h.DB.Model(&model.ShareTemplate{})
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
 	} else {
-		query = query.Where("agent_node_id IS NULL")
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
 	}
 	query.Order("sort_order ASC, id ASC").Find(&templates)
 	ok(c, templates)
@@ -2008,9 +2045,6 @@ func (h *Handler) ListShareTemplates(c *gin.Context) {
 // CreateShareTemplate สร้าง template ใหม่
 // Body: { "name": "...", "content": "สมัครเลย! {link}", "platform": "all", "sort_order": 0 }
 func (h *Handler) CreateShareTemplate(c *gin.Context) {
-	// ⭐ ดึง scope — ใช้ SettingNodeID() เพื่อ set agent_node_id ตอน INSERT
-	scope := mw.GetNodeScope(c, h.DB)
-
 	var req struct {
 		Name      string `json:"name" binding:"required"`
 		Content   string `json:"content" binding:"required"`
@@ -2019,14 +2053,11 @@ func (h *Handler) CreateShareTemplate(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
-	agentID := int64(1)
 	if req.Platform == "" {
 		req.Platform = "all"
 	}
 
 	tmpl := model.ShareTemplate{
-		AgentID:     agentID,
-		AgentNodeID: scope.SettingNodeID(), // ⭐ admin=nil (ระบบกลาง), node=&nodeID (เฉพาะ node)
 		Name:        req.Name,
 		Content:     req.Content,
 		Platform:    req.Platform,
@@ -2100,13 +2131,12 @@ func (h *Handler) DeleteShareTemplate(c *gin.Context) {
 // ListCommissionAdjustments ดูประวัติการปรับค่าคอม
 // Query: ?member_id=11&page=1&per_page=20
 func (h *Handler) ListCommissionAdjustments(c *gin.Context) {
-	agentID := int64(1)
 	page, perPage := pageParams(c)
 	memberIDStr := c.Query("member_id")
 
+	// ⭐ ไม่ filter agent_node_id ตรงนี้ — admin เห็นทั้งหมด
 	query := h.DB.Model(&model.CommissionAdjustment{}).
-		Preload("Member").
-		Where("agent_id = ?", agentID)
+		Preload("Member")
 
 	if memberIDStr != "" {
 		mID, _ := strconv.ParseInt(memberIDStr, 10, 64)
@@ -2139,7 +2169,6 @@ func (h *Handler) ListCommissionAdjustments(c *gin.Context) {
 //   - cancel: ยกเลิก commission เฉพาะรายการ (เปลี่ยน status เป็น cancelled)
 func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 	adminID := int64(1) // TODO: ดึงจาก JWT เมื่อมี admin auth
-	agentID := int64(1)
 
 	var req struct {
 		MemberID     int64   `json:"member_id" binding:"required"`
@@ -2167,7 +2196,6 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 		comm := model.ReferralCommission{
 			ReferrerID:       req.MemberID,
 			ReferredID:       req.MemberID, // admin ปรับเอง ไม่มี referred จริง
-			AgentID:          agentID,
 			BetAmount:        0,
 			CommissionRate:   0,
 			CommissionAmount: req.Amount,
@@ -2182,7 +2210,7 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 		// หักค่าคอม pending → ลด pending commissions
 		// อัพเดท commissions ล่าสุดเป็น cancelled จนครบ amount
 		var pendingComms []model.ReferralCommission
-		tx.Where("referrer_id = ? AND agent_id = ? AND status = ?", req.MemberID, agentID, "pending").
+		tx.Where("referrer_id = ? AND status = ?", req.MemberID, "pending").
 			Order("created_at DESC").Find(&pendingComms)
 
 		remaining := req.Amount
@@ -2213,7 +2241,6 @@ func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
 
 	// สร้าง audit log
 	adjustment := model.CommissionAdjustment{
-		AgentID:       agentID,
 		MemberID:      req.MemberID,
 		AdminID:       adminID,
 		Type:          req.Type,
@@ -2311,7 +2338,7 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 	tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", amount, memberID)
 
 	// สร้าง transaction record
-	tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+	tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 		VALUES (1, ?, 'deposit', ?, ?, ?, ?, 'deposit_request', ?, ?)`,
 		memberID, amount, balanceBefore, balanceBefore+amount, id, "อนุมัติโดยแอดมิน #"+strconv.FormatInt(adminID, 10), now)
 
@@ -2356,7 +2383,7 @@ func (h *Handler) ApproveDeposit(c *gin.Context) {
 					tx.Exec("UPDATE members SET balance = balance + ? WHERE id = ?", bonus, memberID)
 
 					// สร้าง bonus transaction
-					tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+					tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 						VALUES (1, ?, 'bonus', ?, ?, ?, ?, 'first_deposit', ?, ?)`,
 						memberID, bonus, balanceAfterDeposit, balanceAfterDeposit+bonus, id, "โบนัสฝากครั้งแรก", now)
 
@@ -2468,7 +2495,7 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
 
 		// บันทึก transaction — หักเครดิตคืน
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+		tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 			VALUES (1, ?, 'admin_debit', ?, ?, ?, ?, 'deposit_cancel', ?, ?)`,
 			memberID, -amount, balanceAfter+amount, balanceAfter, id,
 			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
@@ -2476,7 +2503,7 @@ func (h *Handler) CancelDeposit(c *gin.Context) {
 		// ⭐ refund=false → ยกเลิกอย่างเดียว ไม่หักเงิน แต่บันทึก audit trail
 		var balance float64
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+		tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 			VALUES (1, ?, 'admin_debit', 0, ?, ?, ?, 'deposit_cancel_no_refund', ?, ?)`,
 			memberID, balance, balance, id,
 			"ยกเลิกฝาก #"+strconv.FormatInt(id, 10)+" (ไม่หักเครดิต): "+req.Reason, now)
@@ -2585,7 +2612,7 @@ func (h *Handler) ApproveWithdraw(c *gin.Context) {
 			// ดึงบัญชีต้นทาง (agent bank account ที่ register กับ RKAUTO)
 			var sourceBankUUID string
 			h.DB.Table("agent_bank_accounts").Select("rkauto_uuid").
-				Where("agent_id = 1 AND rkauto_uuid != '' AND status = 'active'").
+				Where("agent_node_id IS NOT NULL AND rkauto_uuid != '' AND status = 'active'").
 				Limit(1).Row().Scan(&sourceBankUUID)
 
 			if sourceBankUUID != "" && bankAccountNo != "" {
@@ -2682,7 +2709,7 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balanceAfter)
 
 		// บันทึก transaction คืนเงิน
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+		tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 			VALUES (1, ?, 'refund', ?, ?, ?, ?, 'withdraw_reject', ?, ?)`,
 			memberID, amount, balanceAfter-amount, balanceAfter, id,
 			"คืนเงินถอน #"+strconv.FormatInt(id, 10)+": "+req.Reason, now)
@@ -2690,7 +2717,7 @@ func (h *Handler) RejectWithdraw(c *gin.Context) {
 		// ⭐ refund=false → ไม่คืนเงิน (ทุจริต) แต่บันทึก audit trail
 		var balance float64
 		tx.Table("members").Select("balance").Where("id = ?", memberID).Row().Scan(&balance)
-		tx.Exec(`INSERT INTO transactions (agent_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
+		tx.Exec(`INSERT INTO transactions (agent_node_id, member_id, type, amount, balance_before, balance_after, reference_id, reference_type, note, created_at)
 			VALUES (1, ?, 'admin_debit', 0, ?, ?, ?, 'withdraw_reject_no_refund', ?, ?)`,
 			memberID, balance, balance, id,
 			"ปฏิเสธถอน #"+strconv.FormatInt(id, 10)+" (ไม่คืนเครดิต/ทุจริต): "+req.Reason, now)
@@ -2733,13 +2760,11 @@ func (h *Handler) CreateAutoBanRule(c *gin.Context) {
 	rule.Status = "active"
 	rule.CreatedAt = time.Now()
 	rule.UpdatedAt = time.Now()
-	if rule.AgentID == 0 {
-		rule.AgentID = 1
-	}
 	// ⭐ node user: ตั้ง agent_node_id ให้กฎเป็นของ node ตัวเอง
 	if scope.IsNode {
-		nid := scope.NodeID
-		rule.AgentNodeID = &nid
+		rule.AgentNodeID = scope.NodeID
+	} else if rule.AgentNodeID == 0 {
+		rule.AgentNodeID = 1 // default root node
 	}
 	if err := h.DB.Create(&rule).Error; err != nil {
 		fail(c, 500, "failed to create auto-ban rule")
@@ -2781,10 +2806,9 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 
 	// สร้างกฎใหม่ทั้งหมด
 	now := time.Now()
-	var nodeIDPtr *int64
+	batchNodeID := int64(1) // default root
 	if scope.IsNode {
-		nid := scope.NodeID
-		nodeIDPtr = &nid
+		batchNodeID = scope.NodeID
 	}
 	created := make([]model.AutoBanRule, 0, len(req.Rules))
 	for _, r := range req.Rules {
@@ -2793,8 +2817,7 @@ func (h *Handler) BulkCreateAutoBanRules(c *gin.Context) {
 			action = "full_ban"
 		}
 		rule := model.AutoBanRule{
-			AgentID:         1,
-			AgentNodeID:     nodeIDPtr, // ⭐ NULL=ทั้งระบบ (admin), มีค่า=เฉพาะ node
+			AgentNodeID:     batchNodeID, // ⭐ root node ID
 			LotteryTypeID:   req.LotteryTypeID,
 			BetType:         r.BetType,
 			ThresholdAmount: r.ThresholdAmount,
@@ -2829,7 +2852,7 @@ func (h *Handler) UpdateAutoBanRule(c *gin.Context) {
 		return
 	}
 	// ⭐ node user: แก้ได้เฉพาะกฎของ node ตัวเอง
-	if scope.IsNode && (rule.AgentNodeID == nil || !func() bool { for _, nid := range scope.NodeIDs { if nid == *rule.AgentNodeID { return true } }; return false }()) {
+	if scope.IsNode && !func() bool { for _, nid := range scope.NodeIDs { if nid == rule.AgentNodeID { return true } }; return false }() {
 		fail(c, 403, "ไม่สามารถแก้ไขกฎของระบบได้"); return
 	}
 	var req struct {
@@ -2863,7 +2886,7 @@ func (h *Handler) DeleteAutoBanRule(c *gin.Context) {
 	if scope.IsNode {
 		var rule model.AutoBanRule
 		h.DB.First(&rule, id)
-		if rule.AgentNodeID == nil || !func() bool { for _, nid := range scope.NodeIDs { if nid == *rule.AgentNodeID { return true } }; return false }() {
+		if !func() bool { for _, nid := range scope.NodeIDs { if nid == rule.AgentNodeID { return true } }; return false }() {
 			fail(c, 403, "ไม่สามารถลบกฎของระบบได้"); return
 		}
 	}
@@ -2891,9 +2914,9 @@ func (h *Handler) ListYeekeeRounds(c *gin.Context) {
 	// ⭐ scope: ยี่กีเว็บใครเว็บมัน
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID)
-	} else if aidStr := c.Query("agent_id"); aidStr != "" {
+	} else if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { query = query.Where("agent_id = ?", aid) }
+		if aid > 0 { query = query.Where("agent_node_id = ?", aid) }
 	}
 
 	// Filter by status
@@ -3009,9 +3032,9 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 	baseQuery := h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today)
 	if scope.IsNode {
 		baseQuery = baseQuery.Where("agent_node_id = ?", scope.NodeID)
-	} else if aidStr := c.Query("agent_id"); aidStr != "" {
+	} else if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { baseQuery = baseQuery.Where("agent_id = ?", aid) }
+		if aid > 0 { baseQuery = baseQuery.Where("agent_node_id = ?", aid) }
 	}
 
 	// นับรอบตาม status
@@ -3025,18 +3048,18 @@ func (h *Handler) GetYeekeeStats(c *gin.Context) {
 	shootQuery := h.DB.Model(&model.YeekeeShoot{}).
 		Joins("JOIN yeekee_rounds ON yeekee_shoots.yeekee_round_id = yeekee_rounds.id").
 		Where("DATE(yeekee_rounds.start_time) = ?", today)
-	if aidStr := c.Query("agent_id"); aidStr != "" {
+	if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { shootQuery = shootQuery.Where("yeekee_rounds.agent_id = ?", aid) }
+		if aid > 0 { shootQuery = shootQuery.Where("yeekee_rounds.agent_node_id = ?", aid) }
 	}
 	shootQuery.Count(&stats.TotalShoots)
 
 	// สถิติ bets — ดึงเฉพาะ bets ของรอบยี่กีวันนี้
 	var yeekeeRoundIDs []int64
 	pluckQuery := h.DB.Model(&model.YeekeeRound{}).Where("DATE(start_time) = ?", today)
-	if aidStr := c.Query("agent_id"); aidStr != "" {
+	if aidStr := c.Query("agent_node_id"); aidStr != "" {
 		aid, _ := strconv.ParseInt(aidStr, 10, 64)
-		if aid > 0 { pluckQuery = pluckQuery.Where("agent_id = ?", aid) }
+		if aid > 0 { pluckQuery = pluckQuery.Where("agent_node_id = ?", aid) }
 	}
 	pluckQuery.Pluck("lottery_round_id", &yeekeeRoundIDs)
 
@@ -3064,7 +3087,7 @@ func (h *Handler) ListStaff(c *gin.Context) {
 	if scope.IsNode {
 		query = query.Where("agent_node_id = ?", scope.NodeID) // ⭐ เห็นเฉพาะพนักงานเว็บตัวเอง
 	} else {
-		query = query.Where("agent_node_id IS NULL") // admin เห็นเฉพาะพนักงานระดับระบบ
+		query = query.Where("agent_node_id = ?", scope.RootNodeID) // admin เห็นเฉพาะพนักงานระดับระบบ
 	}
 	query.Order("created_at DESC").Find(&admins)
 	ok(c, admins)
@@ -3100,10 +3123,20 @@ func (h *Handler) CreateStaff(c *gin.Context) {
 }
 
 // UpdateStaff แก้ไข admin
+// ⭐ scope: ป้องกัน node แก้พนักงานเว็บอื่น
 func (h *Handler) UpdateStaff(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
 	var admin model.Admin
-	if err := h.DB.First(&admin, id).Error; err != nil { fail(c, 404, "admin not found"); return }
+	// ⭐ scope: ดึงเฉพาะพนักงานในเว็บเดียวกัน
+	query := h.DB.Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
+	}
+	if err := query.First(&admin).Error; err != nil { fail(c, 404, "admin not found"); return }
 
 	var req struct {
 		Name        string `json:"name"`
@@ -3114,8 +3147,30 @@ func (h *Handler) UpdateStaff(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
 
 	if req.Name != "" { admin.Name = req.Name }
-	if req.Role != "" { admin.Role = req.Role }
-	if req.Permissions != "" { admin.Permissions = req.Permissions }
+	// ⭐ Validate role — ห้ามตั้ง role เกินสิทธิ์ตัวเอง
+	if req.Role != "" {
+		allowedRoles := map[string]bool{"operator": true, "viewer": true}
+		// owner เปลี่ยนได้ทุก role, admin เปลี่ยนได้เฉพาะ operator/viewer
+		callerRole, _ := c.Get("admin_role")
+		if callerRole == "owner" {
+			allowedRoles["admin"] = true
+			allowedRoles["owner"] = true
+		}
+		if !allowedRoles[req.Role] {
+			fail(c, 403, "ไม่มีสิทธิ์ตั้ง role \""+req.Role+"\"")
+			return
+		}
+		admin.Role = req.Role
+	}
+	if req.Permissions != "" {
+		// ⭐ Validate permissions format — ต้องเป็น JSON array of strings
+		var perms []string
+		if err := json.Unmarshal([]byte(req.Permissions), &perms); err != nil {
+			fail(c, 400, "permissions ต้องเป็น JSON array เช่น [\"members.view\",\"finance.deposits\"]")
+			return
+		}
+		admin.Permissions = req.Permissions
+	}
 	if req.Password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil { fail(c, 500, "failed to hash password"); return }
@@ -3126,27 +3181,62 @@ func (h *Handler) UpdateStaff(c *gin.Context) {
 }
 
 // UpdateStaffStatus เปลี่ยนสถานะ admin
+// ⭐ scope: ป้องกัน node เปลี่ยนสถานะพนักงานเว็บอื่น
 func (h *Handler) UpdateStaffStatus(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct { Status string `json:"status" binding:"required"` }
 	if err := c.ShouldBindJSON(&req); err != nil { fail(c, 400, err.Error()); return }
-	h.DB.Model(&model.Admin{}).Where("id = ?", id).Update("status", req.Status)
+
+	query := h.DB.Model(&model.Admin{}).Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
+	}
+	result := query.Update("status", req.Status)
+	if result.RowsAffected == 0 { fail(c, 404, "admin not found หรือไม่มีสิทธิ์"); return }
 	ok(c, gin.H{"id": id, "status": req.Status})
 }
 
 // DeleteStaff ลบ admin (soft delete)
+// ⭐ scope: ป้องกัน node ลบพนักงานเว็บอื่น
 func (h *Handler) DeleteStaff(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	adminID := middleware.GetAdminID(c)
 	if id == adminID { fail(c, 400, "ไม่สามารถลบตัวเองได้"); return }
-	h.DB.Model(&model.Admin{}).Where("id = ?", id).Update("status", "deleted")
+
+	query := h.DB.Model(&model.Admin{}).Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
+	}
+	result := query.Update("status", "deleted")
+	if result.RowsAffected == 0 { fail(c, 404, "admin not found หรือไม่มีสิทธิ์"); return }
 	ok(c, gin.H{"id": id, "status": "deleted"})
 }
 
 // GetStaffLoginHistory ดูประวัติ login ของพนักงาน
 // GET /api/v1/staff/:id/login-history
+// ⭐ scope: ดูได้เฉพาะพนักงานในเว็บตัวเอง
 func (h *Handler) GetStaffLoginHistory(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	// เช็คว่า staff คนนี้อยู่ในเว็บเดียวกัน
+	var admin model.Admin
+	query := h.DB.Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
+	}
+	if err := query.First(&admin).Error; err != nil {
+		fail(c, 404, "ไม่พบพนักงาน หรือไม่มีสิทธิ์ดู"); return
+	}
+
 	var history []model.AdminLoginHistory
 	h.DB.Where("admin_id = ?", id).Order("created_at DESC").Limit(50).Find(&history)
 	ok(c, history)
@@ -3154,8 +3244,23 @@ func (h *Handler) GetStaffLoginHistory(c *gin.Context) {
 
 // GetStaffActivity ดู activity log ของพนักงานคนเดียว
 // GET /api/v1/staff/:id/activity
+// ⭐ scope: ดูได้เฉพาะพนักงานในเว็บตัวเอง
 func (h *Handler) GetStaffActivity(c *gin.Context) {
+	scope := mw.GetNodeScope(c, h.DB)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+
+	// เช็คว่า staff คนนี้อยู่ในเว็บเดียวกัน
+	var admin model.Admin
+	query := h.DB.Where("id = ?", id)
+	if scope.IsNode {
+		query = query.Where("agent_node_id = ?", scope.NodeID)
+	} else {
+		query = query.Where("agent_node_id = ?", scope.RootNodeID)
+	}
+	if err := query.First(&admin).Error; err != nil {
+		fail(c, 404, "ไม่พบพนักงาน หรือไม่มีสิทธิ์ดู"); return
+	}
+
 	var logs []model.ActivityLog
 	h.DB.Where("admin_id = ?", id).Order("created_at DESC").Limit(50).Find(&logs)
 	ok(c, logs)
@@ -3373,7 +3478,7 @@ func (h *Handler) GetAvailablePermissions(c *gin.Context) {
 // GetYeekeeAgentConfig ดูว่า agent ไหนเปิดยี่กีอยู่
 // GET /api/v1/yeekee/config
 //
-// Response: array ของ { agent_id, agent_name, lottery_type_id, enabled }
+// Response: array ของ { agent_node_id, agent_name, lottery_type_id, enabled }
 func (h *Handler) GetYeekeeAgentConfig(c *gin.Context) {
 	// ดึง YEEKEE lottery type ID
 	var yeekeeTypeID int64
@@ -3382,24 +3487,25 @@ func (h *Handler) GetYeekeeAgentConfig(c *gin.Context) {
 		fail(c, 404, "YEEKEE lottery type not found"); return
 	}
 
-	// ดึง agents ทั้งหมด + สถานะยี่กี (LEFT JOIN agent_lottery_config)
+	// ดึง root nodes ทั้งหมด + สถานะยี่กี (LEFT JOIN agent_lottery_config)
+	// ⭐ ย้ายจาก agents → agent_nodes (root node = role='admin', parent_id IS NULL)
 	type AgentConfig struct {
-		AgentID   int64  `json:"agent_id"`
-		AgentName string `json:"agent_name"`
-		AgentCode string `json:"agent_code"`
-		Enabled   bool   `json:"enabled"`
+		AgentNodeID int64  `json:"agent_node_id"`
+		AgentName   string `json:"agent_name"`
+		AgentCode   string `json:"agent_code"`
+		Enabled     bool   `json:"enabled"`
 	}
 
 	var configs []AgentConfig
 	h.DB.Raw(`
 		SELECT
-			a.id AS agent_id, a.name AS agent_name, a.code AS agent_code,
+			n.id AS agent_node_id, n.name AS agent_name, n.code AS agent_code,
 			COALESCE(alc.enabled, 0) AS enabled
-		FROM agents a
+		FROM agent_nodes n
 		LEFT JOIN agent_lottery_config alc
-			ON alc.agent_id = a.id AND alc.lottery_type_id = ?
-		WHERE a.status = 'active'
-		ORDER BY a.id
+			ON alc.agent_node_id = n.id AND alc.lottery_type_id = ?
+		WHERE n.role = 'admin' AND n.parent_id IS NULL AND n.status = 'active'
+		ORDER BY n.id
 	`, yeekeeTypeID).Scan(&configs)
 
 	ok(c, gin.H{
@@ -3408,15 +3514,15 @@ func (h *Handler) GetYeekeeAgentConfig(c *gin.Context) {
 	})
 }
 
-// SetYeekeeAgentConfig เปิด/ปิดยี่กี สำหรับ agent
+// SetYeekeeAgentConfig เปิด/ปิดยี่กี สำหรับ root node
 // POST /api/v1/yeekee/config
-// Body: { "agent_id": 1, "enabled": true }
+// Body: { "agent_node_id": 1, "enabled": true }
 //
 // ⭐ ใช้ UPSERT — ถ้ายังไม่มี row ใน agent_lottery_config → สร้าง, ถ้ามีแล้ว → update
 func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
 	var req struct {
-		AgentID int64 `json:"agent_id" binding:"required"`
-		Enabled bool  `json:"enabled"`
+		AgentNodeID int64 `json:"agent_node_id" binding:"required"`
+		Enabled     bool  `json:"enabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, 400, err.Error()); return
@@ -3429,11 +3535,11 @@ func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
 		fail(c, 404, "YEEKEE lottery type not found"); return
 	}
 
-	// เช็คว่า agent มีจริง
-	var agentExists int64
-	h.DB.Table("agents").Where("id = ? AND status = ?", req.AgentID, "active").Count(&agentExists)
-	if agentExists == 0 {
-		fail(c, 404, "agent not found"); return
+	// เช็คว่า root node มีจริง
+	var nodeExists int64
+	h.DB.Table("agent_nodes").Where("id = ? AND role = 'admin' AND status = ?", req.AgentNodeID, "active").Count(&nodeExists)
+	if nodeExists == 0 {
+		fail(c, 404, "agent node not found"); return
 	}
 
 	// UPSERT: INSERT ... ON DUPLICATE KEY UPDATE
@@ -3441,17 +3547,17 @@ func (h *Handler) SetYeekeeAgentConfig(c *gin.Context) {
 	if req.Enabled { enabledInt = 1 }
 
 	h.DB.Exec(`
-		INSERT INTO agent_lottery_config (agent_id, lottery_type_id, enabled, created_at)
+		INSERT INTO agent_lottery_config (agent_node_id, lottery_type_id, enabled, created_at)
 		VALUES (?, ?, ?, NOW())
 		ON DUPLICATE KEY UPDATE enabled = ?
-	`, req.AgentID, yeekeeTypeID, enabledInt, enabledInt)
+	`, req.AgentNodeID, yeekeeTypeID, enabledInt, enabledInt)
 
 	action := "ปิด"
 	if req.Enabled { action = "เปิด" }
-	log.Printf("🎯 Yeekee %s for agent %d", action, req.AgentID)
+	log.Printf("🎯 Yeekee %s for root node %d", action, req.AgentNodeID)
 
 	ok(c, gin.H{
-		"agent_id":        req.AgentID,
+		"agent_node_id":   req.AgentNodeID,
 		"lottery_type_id": yeekeeTypeID,
 		"enabled":         req.Enabled,
 		"message":         action + "ยี่กีสำเร็จ",
@@ -3536,7 +3642,7 @@ func (h *Handler) ManualSettleYeekeeRound(c *gin.Context) {
 	})
 
 	// Settlement — เทียบ bets + จ่ายเงิน
-	settleYeekeeBets(h.DB, yr.LotteryRoundID, yr.AgentID, roundResult)
+	settleYeekeeBets(h.DB, yr.LotteryRoundID, yr.AgentNodeID, roundResult)
 
 	// บันทึก action log
 	logManualSettle(h.DB, c, yr, resultNumber, "settled")
@@ -3555,7 +3661,7 @@ func (h *Handler) ManualSettleYeekeeRound(c *gin.Context) {
 }
 
 // settleYeekeeBets เทียบ bets กับผลยี่กี + จ่ายเงินรางวัล (เหมือน member-api cron)
-func settleYeekeeBets(db *gorm.DB, lotteryRoundID int64, agentID int64, roundResult coreTypes.RoundResult) {
+func settleYeekeeBets(db *gorm.DB, lotteryRoundID int64, rootNodeID int64, roundResult coreTypes.RoundResult) {
 	var bets []model.Bet
 	db.Where("lottery_round_id = ? AND status = ?", lotteryRoundID, "pending").
 		Preload("BetType").Find(&bets)
@@ -3582,8 +3688,8 @@ func settleYeekeeBets(db *gorm.DB, lotteryRoundID int64, agentID int64, roundRes
 		RoundID: lotteryRoundID, Result: roundResult, Bets: coreBets,
 	})
 
-	log.Printf("💰 [manual-settle] round=%d, agent=%d, bets=%d, winners=%d, win=%.2f",
-		lotteryRoundID, agentID, len(bets), settleOutput.TotalWinners, settleOutput.TotalWinAmount)
+	log.Printf("💰 [manual-settle] round=%d, rootNode=%d, bets=%d, winners=%d, win=%.2f",
+		lotteryRoundID, rootNodeID, len(bets), settleOutput.TotalWinners, settleOutput.TotalWinAmount)
 
 	tx := db.Begin()
 	defer func() {
@@ -3640,8 +3746,8 @@ func settleYeekeeBets(db *gorm.DB, lotteryRoundID int64, agentID int64, roundRes
 			CreatedAt:     now,
 		}
 		tx.Create(&winTx)
-		// agent_id ไม่อยู่ใน admin model → set ตรงผ่าน SQL
-		tx.Exec("UPDATE transactions SET agent_id = ? WHERE id = ?", agentID, winTx.ID)
+		// agent_node_id ไม่อยู่ใน admin model → set ตรงผ่าน SQL
+		tx.Exec("UPDATE transactions SET agent_node_id = ? WHERE id = ?", rootNodeID, winTx.ID)
 	}
 
 	if err := tx.Commit().Error; err != nil {
@@ -3665,7 +3771,7 @@ func logManualSettle(db *gorm.DB, c *gin.Context, yr model.YeekeeRound, resultNu
 
 	details, _ := json.Marshal(map[string]interface{}{
 		"round_no":      yr.RoundNo,
-		"agent_id":      yr.AgentID,
+		"agent_node_id": yr.AgentNodeID,
 		"result_number": resultNumber,
 		"outcome":       outcome,
 	})
@@ -3679,4 +3785,30 @@ func logManualSettle(db *gorm.DB, c *gin.Context, yr model.YeekeeRound, resultNu
 		IP:         c.ClientIP(),
 		CreatedAt:  time.Now(),
 	})
+}
+
+// =============================================================================
+// Themes — รายการธีมสำเร็จรูป
+// =============================================================================
+
+// ListThemes ดึงรายการธีมทั้งหมด (สำหรับ dropdown ตอนสร้าง/แก้เว็บ)
+// GET /api/v1/themes
+func (h *Handler) ListThemes(c *gin.Context) {
+	type themeItem struct {
+		ID             int64  `json:"id"`
+		Code           string `json:"code"`
+		Name           string `json:"name"`
+		PreviewURL     string `json:"preview_url"`
+		PrimaryColor   string `json:"primary_color"`
+		SecondaryColor string `json:"secondary_color"`
+		BGColor        string `json:"bg_color"`
+		AccentColor    string `json:"accent_color"`
+		CardGradient1  string `json:"card_gradient1"`
+		CardGradient2  string `json:"card_gradient2"`
+		NavBG          string `json:"nav_bg"`
+		HeaderBG       string `json:"header_bg"`
+	}
+	var themes []themeItem
+	h.DB.Table("themes").Where("status = 'active'").Order("sort_order ASC, id ASC").Scan(&themes)
+	ok(c, themes)
 }

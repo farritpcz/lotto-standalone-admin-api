@@ -3,23 +3,29 @@
 //
 // Unified Round Lifecycle — สร้าง + เปิด + ปิดรอบอัตโนมัติ
 //
-// ⭐ รวม round_create.go + round_cron.go เข้าด้วยกัน
-//
-// Jobs ที่ run:
-//   1. Auto-Create: สร้างรอบล่วงหน้า 7 วัน (ทุก 1 ชั่วโมง)
+// ⭐ Jobs ที่ run:
+//   1. Auto-Create: สร้างรอบล่วงหน้า 30 วัน (ทุก 1 ชั่วโมง) — อ่าน schedule จาก DB
 //   2. Auto-Transition: upcoming→open→closed ตามเวลา (ทุก 30 วินาที)
 //
 // ⭐ ไม่จัดการยี่กี — ยี่กีจัดการใน member-api/job/yeekee_cron.go
 //
+// ⭐ Schedule source of truth (since migration 025):
+//   - lottery_types.schedule_config JSON
+//   - { "day_type": "daily|weekday|thai_gov", "open_time": "HH:MM", "close_time": "HH:MM" }
+//   - NULL = ไม่ auto-create (ต้องสร้าง manual)
+//
 // ความสัมพันธ์:
 //   - ใช้ service.RoundService สำหรับ batch open/close
 //   - share DB กับ member-api (#3)
-//   - lottery_types table: ID + code + status
+//   - lottery_types table: ID + code + status + schedule_config
 //   - lottery_rounds table: สร้าง + อัพเดทสถานะ
+//
+// Rule file: docs/rules/round_management.md
 // =============================================================================
 package job
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -30,24 +36,18 @@ import (
 )
 
 // =============================================================================
-// Schedule Config — กำหนดการสร้างรอบอัตโนมัติ
+// Schedule Config — โครงสร้าง JSON ใน lottery_types.schedule_config
 // =============================================================================
 
-// roundSchedule กำหนดการสร้างรอบสำหรับแต่ละประเภทหวย
-//
-// ⭐ ในอนาคตจะย้ายไปเก็บใน DB (admin ตั้งผ่าน UI)
-// ตอนนี้ hardcode ไว้ก่อน — เพิ่ม/ลบได้ง่าย
-type roundSchedule struct {
-	LotteryCode string                // code ใน lottery_types table เช่น "THAI_GOV"
-	OpenHour    int                   // ชั่วโมงเปิดรับ (0-23)
-	OpenMin     int                   // นาทีเปิดรับ (0-59)
-	CloseHour   int                   // ชั่วโมงปิดรับ (0-23)
-	CloseMin    int                   // นาทีปิดรับ (0-59)
-	ShouldRun   func(time.Time) bool  // ฟังก์ชันเช็คว่าวันนี้ต้องสร้างรอบหรือไม่
-	Suffix      string                // suffix สำหรับ round_number (เช่น "-AM", "-PM", "")
+// ScheduleConfig ตรงกับ JSON ใน lottery_types.schedule_config
+// อ่านครั้งเดียวตอน cron tick, cache ในหน่วยความจำระหว่าง loop
+type ScheduleConfig struct {
+	DayType   string `json:"day_type"`   // "daily" | "weekday" | "thai_gov"
+	OpenTime  string `json:"open_time"`  // "HH:MM" 24h
+	CloseTime string `json:"close_time"` // "HH:MM" 24h — ถ้า < open_time = ปิดวันถัดไป
 }
 
-// ─── วันที่ต้องสร้างรอบ ───────────────────────────────────────
+// ─── Day-type predicates ─────────────────────────────────────
 // หวยไทย: วันที่ 1, 16 ของเดือน
 func isThaiLotteryDay(d time.Time) bool { return d.Day() == 1 || d.Day() == 16 }
 
@@ -60,63 +60,29 @@ func isWeekday(d time.Time) bool {
 // ทุกวัน — ใช้สำหรับหวยลาว, ฮานอย, มาเลย์
 func isEveryDay(_ time.Time) bool { return true }
 
-// ─── ตาราง schedule ทั้งหมด 39 ประเภท ────────────────────────
-// ⭐ เวลาทั้งหมดเป็นเวลาไทย (Asia/Bangkok, UTC+7)
-// ⭐ Yeekee ไม่อยู่ในตารางนี้ — จัดการใน member-api
-var defaultSchedules = []roundSchedule{
-	// ── กลุ่มหวยไทย (วันที่ 1, 16) ──────────────────────────────
-	{LotteryCode: "THAI_GOV", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
-	{LotteryCode: "BAAC", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
-	{LotteryCode: "GSB", OpenHour: 6, OpenMin: 0, CloseHour: 15, CloseMin: 30, ShouldRun: isThaiLotteryDay},
+// shouldRunForDayType เช็คว่าวันนี้ต้องสร้างรอบตาม day_type หรือไม่
+func shouldRunForDayType(dayType string, d time.Time) bool {
+	switch dayType {
+	case "thai_gov":
+		return isThaiLotteryDay(d)
+	case "weekday":
+		return isWeekday(d)
+	case "daily":
+		return isEveryDay(d)
+	default:
+		return false // unknown day_type → ไม่สร้าง (กันพลาด)
+	}
+}
 
-	// ── กลุ่มหวยลาว (ทุกวัน) ────────────────────────────────────
-	{LotteryCode: "LAO_VIP", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
-	{LotteryCode: "LAO_PATTANA", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
-	{LotteryCode: "LAO_STAR", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
-	{LotteryCode: "LAO_SAMAKKEE", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
-	{LotteryCode: "LAO_THAKHEK_VIP", OpenHour: 6, OpenMin: 0, CloseHour: 20, CloseMin: 0, ShouldRun: isEveryDay},
-
-	// ── กลุ่มหวยฮานอย (ทุกวัน) ──────────────────────────────────
-	{LotteryCode: "HANOI", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 0, ShouldRun: isEveryDay},
-	{LotteryCode: "HANOI_VIP", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 0, ShouldRun: isEveryDay},
-	{LotteryCode: "HANOI_PATTANA", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 0, ShouldRun: isEveryDay},
-
-	// ── มาเลย์ (ทุกวัน) ─────────────────────────────────────────
-	{LotteryCode: "MALAY", OpenHour: 6, OpenMin: 0, CloseHour: 18, CloseMin: 30, ShouldRun: isEveryDay},
-
-	// ── กลุ่มหวยหุ้น (จ-ศ) ──────────────────────────────────────
-	// VIP
-	{LotteryCode: "STOCK_RUSSIA_VIP", OpenHour: 9, OpenMin: 0, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_DJ_VIP", OpenHour: 20, OpenMin: 0, CloseHour: 23, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_HSI_VIP_AM", OpenHour: 9, OpenMin: 0, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_TAIWAN_VIP", OpenHour: 9, OpenMin: 0, CloseHour: 13, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_KOREA_VIP", OpenHour: 9, OpenMin: 0, CloseHour: 13, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_HSI_VIP_PM", OpenHour: 13, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday},
-	// รอบเช้า
-	{LotteryCode: "STOCK_NIKKEI_AM", OpenHour: 9, OpenMin: 0, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_CHINA_AM", OpenHour: 9, OpenMin: 30, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_HSI_AM", OpenHour: 9, OpenMin: 30, CloseHour: 12, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_TAIWAN", OpenHour: 9, OpenMin: 0, CloseHour: 13, CloseMin: 30, ShouldRun: isWeekday},
-	// รอบบ่าย
-	{LotteryCode: "STOCK_NIKKEI_PM", OpenHour: 12, OpenMin: 30, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_KOREA", OpenHour: 9, OpenMin: 0, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_CHINA_PM", OpenHour: 13, OpenMin: 0, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_HSI_PM", OpenHour: 13, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday},
-	// รอบเย็น/ค่ำ
-	{LotteryCode: "STOCK_TH_PM", OpenHour: 14, OpenMin: 30, CloseHour: 16, CloseMin: 30, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_SINGAPORE", OpenHour: 9, OpenMin: 0, CloseHour: 17, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_INDIA", OpenHour: 10, OpenMin: 0, CloseHour: 16, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_UK", OpenHour: 14, OpenMin: 0, CloseHour: 21, CloseMin: 30, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_GERMANY", OpenHour: 14, OpenMin: 0, CloseHour: 22, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_RUSSIA", OpenHour: 13, OpenMin: 0, CloseHour: 23, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_DJ", OpenHour: 20, OpenMin: 30, CloseHour: 3, CloseMin: 0, ShouldRun: isWeekday},
-	// VIP เพิ่มเติม
-	{LotteryCode: "STOCK_GERMANY_VIP", OpenHour: 14, OpenMin: 0, CloseHour: 22, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_UK_VIP", OpenHour: 14, OpenMin: 0, CloseHour: 21, CloseMin: 30, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_NIKKEI_VIP_PM", OpenHour: 12, OpenMin: 30, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_NIKKEI_VIP_AM", OpenHour: 9, OpenMin: 0, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_CHINA_VIP_PM", OpenHour: 13, OpenMin: 0, CloseHour: 15, CloseMin: 0, ShouldRun: isWeekday},
-	{LotteryCode: "STOCK_CHINA_VIP_AM", OpenHour: 9, OpenMin: 30, CloseHour: 11, CloseMin: 30, ShouldRun: isWeekday},
+// parseHHMM แปลง "HH:MM" → (hour, minute) สองค่า
+// return (-1, -1) ถ้า format ผิด
+func parseHHMM(hhmm string) (int, int) {
+	var h, m int
+	_, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m)
+	if err != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return -1, -1
+	}
+	return h, m
 }
 
 // =============================================================================
@@ -124,12 +90,12 @@ var defaultSchedules = []roundSchedule{
 // =============================================================================
 
 // StartRoundLifecycleJob เริ่ม cron jobs สำหรับ:
-//   - Auto-create: สร้างรอบล่วงหน้า 7 วัน (ทุก 1 ชั่วโมง)
+//   - Auto-create: สร้างรอบล่วงหน้า 30 วัน (ทุก 1 ชั่วโมง)
 //   - Auto-transition: upcoming→open, open→closed (ทุก 30 วินาที)
 //
 // เรียกจาก cmd/server/main.go ตอน startup
 func StartRoundLifecycleJob(svc *service.RoundService) {
-	log.Println("🔄 Round lifecycle job started (create=1h, transition=30s)")
+	log.Println("🔄 Round lifecycle job started (create=1h, transition=30s, window=30d)")
 
 	// ─── Job 1: Auto-Create (ทุก 1 ชั่วโมง) ─────────────────────
 	go func() {
@@ -159,86 +125,121 @@ func StartRoundLifecycleJob(svc *service.RoundService) {
 }
 
 // =============================================================================
-// createUpcomingRounds — สร้างรอบหวยล่วงหน้า 7 วัน
+// createUpcomingRounds — สร้างรอบหวยล่วงหน้า (อ่าน schedule จาก DB)
 // =============================================================================
 
-// createUpcomingRounds ดูล่วงหน้า 7 วัน แล้วสร้างรอบที่ยังไม่มี
+// lookAheadDays — จำนวนวันที่สร้างล่วงหน้า
+// ⭐ 30 วัน ตามที่ตกลง (เดิม 7 วัน) — รองรับให้ admin เห็นรอบหวยไทยได้ทั้งรอบถัดไป
+const lookAheadDays = 30
+
+// lotteryTypeRow ข้อมูลที่อ่านจาก lottery_types สำหรับ cron นี้
+type lotteryTypeRow struct {
+	ID             int64
+	Code           string
+	ScheduleConfig *string // nullable JSON string
+}
+
+// createUpcomingRounds ดูล่วงหน้า 30 วัน แล้วสร้างรอบที่ยังไม่มี
 //
 // Flow:
-//   1. ดึง lottery_types ทั้งหมด (active) → สร้าง map code→ID
-//   2. วนแต่ละวัน (0-7 วันข้างหน้า)
-//   3. วนแต่ละ schedule → เช็ค ShouldRun()
-//   4. สร้าง round_number → เช็คซ้ำ → INSERT
+//  1. ดึง lottery_types ที่ active + มี schedule_config (YEEKEE มี NULL → ข้าม)
+//  2. Parse JSON schedule_config ต่อ type
+//  3. วนแต่ละวัน (0-30 วันข้างหน้า)
+//  4. เช็ค shouldRunForDayType → สร้าง round_number → เช็คซ้ำ → INSERT
 func createUpcomingRounds(db *gorm.DB) {
 	now := time.Now()
-	lookAheadDays := 7
 
-	// ─── ดึง lottery_types ทั้งหมดจาก DB ─────────────────────────
-	type LotteryTypeRow struct {
-		ID   int64
-		Code string
+	// ─── 1) ดึง lottery_types + schedule_config ─────────────────
+	var rows []lotteryTypeRow
+	err := db.Table("lottery_types").
+		Select("id, code, schedule_config").
+		Where("status = ? AND schedule_config IS NOT NULL", "active").
+		Find(&rows).Error
+	if err != nil {
+		log.Printf("⚠️  createUpcomingRounds: failed to load lottery_types: %v", err)
+		return
 	}
-	var ltRows []LotteryTypeRow
-	db.Table("lottery_types").Select("id, code").Where("status = ?", "active").Find(&ltRows)
 
-	// สร้าง map code → ID สำหรับ lookup เร็ว
-	codeToID := make(map[string]int64, len(ltRows))
-	for _, lt := range ltRows {
-		codeToID[lt.Code] = lt.ID
+	if len(rows) == 0 {
+		return // ไม่มี type ที่ active + มี schedule → ข้าม (เช่น DB empty หลัง migrate)
+	}
+
+	// ─── 2) Parse JSON → struct ─────────────────────────────────
+	type parsedSchedule struct {
+		ID        int64
+		Code      string
+		DayType   string
+		OpenHour  int
+		OpenMin   int
+		CloseHour int
+		CloseMin  int
+	}
+	schedules := make([]parsedSchedule, 0, len(rows))
+	for _, row := range rows {
+		if row.ScheduleConfig == nil || *row.ScheduleConfig == "" {
+			continue
+		}
+		var cfg ScheduleConfig
+		if err := json.Unmarshal([]byte(*row.ScheduleConfig), &cfg); err != nil {
+			log.Printf("⚠️  invalid schedule_config for %s: %v", row.Code, err)
+			continue
+		}
+		oh, om := parseHHMM(cfg.OpenTime)
+		ch, cm := parseHHMM(cfg.CloseTime)
+		if oh < 0 || ch < 0 {
+			log.Printf("⚠️  invalid time format for %s: open=%s close=%s", row.Code, cfg.OpenTime, cfg.CloseTime)
+			continue
+		}
+		schedules = append(schedules, parsedSchedule{
+			ID: row.ID, Code: row.Code, DayType: cfg.DayType,
+			OpenHour: oh, OpenMin: om, CloseHour: ch, CloseMin: cm,
+		})
 	}
 
 	totalCreated := 0
 
-	// ─── วนแต่ละวัน (วันนี้ → 7 วันข้างหน้า) ───────────────────
+	// ─── 3) วนแต่ละวัน (วันนี้ → 30 วันข้างหน้า) ────────────────
 	for dayOffset := 0; dayOffset <= lookAheadDays; dayOffset++ {
 		date := now.AddDate(0, 0, dayOffset)
 		dateOnly := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
 
-		// ─── วนแต่ละ schedule ─────────────────────────────────────
-		for _, sched := range defaultSchedules {
-			// เช็คว่าวันนี้ต้องสร้างรอบหรือไม่
-			if !sched.ShouldRun(dateOnly) {
+		// ─── 4) วนแต่ละ schedule ─────────────────────────────────
+		for _, s := range schedules {
+			if !shouldRunForDayType(s.DayType, dateOnly) {
 				continue
 			}
 
-			// ดึง lottery_type_id จาก code
-			ltID, exists := codeToID[sched.LotteryCode]
-			if !exists {
-				continue // lottery type ไม่มีใน DB → ข้าม
-			}
+			// round_number = YYYYMMDD (เช่น "20260404")
+			roundNumber := dateOnly.Format("20060102")
 
-			// สร้าง round_number เช่น "20260404" หรือ "20260404-AM"
-			roundNumber := dateOnly.Format("20060102") + sched.Suffix
-
-			// เช็คว่ามีอยู่แล้วหรือยัง (ป้องกันสร้างซ้ำ)
+			// เช็คว่ามีอยู่แล้วหรือยัง (unique: lottery_type_id + round_number)
 			var existCount int64
 			db.Table("lottery_rounds").
-				Where("lottery_type_id = ? AND round_number = ?", ltID, roundNumber).
+				Where("lottery_type_id = ? AND round_number = ?", s.ID, roundNumber).
 				Count(&existCount)
-
 			if existCount > 0 {
 				continue // มีอยู่แล้ว → ข้าม
 			}
 
 			// คำนวณ open_time / close_time
 			openTime := time.Date(dateOnly.Year(), dateOnly.Month(), dateOnly.Day(),
-				sched.OpenHour, sched.OpenMin, 0, 0, dateOnly.Location())
+				s.OpenHour, s.OpenMin, 0, 0, dateOnly.Location())
 			closeTime := time.Date(dateOnly.Year(), dateOnly.Month(), dateOnly.Day(),
-				sched.CloseHour, sched.CloseMin, 0, 0, dateOnly.Location())
+				s.CloseHour, s.CloseMin, 0, 0, dateOnly.Location())
 
-			// กรณีหุ้นที่ปิดหลังเที่ยงคืน (เช่น ดาวโจนส์ 20:30-03:00)
+			// หุ้นที่ปิดข้ามวัน (เช่น ดาวโจนส์ 20:30-03:00)
 			if closeTime.Before(openTime) {
-				closeTime = closeTime.AddDate(0, 0, 1) // ปิดวันถัดไป
+				closeTime = closeTime.AddDate(0, 0, 1)
 			}
 
-			// ─── INSERT round ─────────────────────────────────────
+			// INSERT — agent_node_id=NULL (global, ตามกฏ multi_agent_scoping)
 			result := db.Exec(`INSERT INTO lottery_rounds
 				(lottery_type_id, round_number, round_date, open_time, close_time, status, result_top3, result_top2, result_bottom2, created_at, updated_at)
 				VALUES (?, ?, ?, ?, ?, 'upcoming', '', '', '', ?, ?)`,
-				ltID, roundNumber, dateOnly, openTime, closeTime, now, now)
+				s.ID, roundNumber, dateOnly, openTime, closeTime, now, now)
 
 			if result.Error != nil {
-				// ส่วนใหญ่จะเป็น duplicate key → ไม่ต้อง log
+				// ส่วนใหญ่ duplicate key race → ไม่ log
 				continue
 			}
 			totalCreated++
@@ -246,38 +247,58 @@ func createUpcomingRounds(db *gorm.DB) {
 	}
 
 	if totalCreated > 0 {
-		log.Printf("📅 Auto-created %d rounds (look-ahead %d days)", totalCreated, lookAheadDays)
+		log.Printf("📅 Auto-created %d rounds (look-ahead %d days, %d schedules)", totalCreated, lookAheadDays, len(schedules))
 	}
 }
 
 // =============================================================================
-// GetDefaultSchedules — expose สำหรับ API (ใช้ดูตาราง schedule)
+// GetDefaultSchedules — expose สำหรับ API (admin UI แสดงตาราง schedule)
 // =============================================================================
 
-// ScheduleInfo ข้อมูล schedule สำหรับแสดงผลใน admin UI
+// ScheduleInfo ข้อมูล schedule สำหรับแสดงใน admin UI
 type ScheduleInfo struct {
 	LotteryCode string `json:"lottery_code"`
-	OpenTime    string `json:"open_time"`    // "HH:MM"
-	CloseTime   string `json:"close_time"`   // "HH:MM"
-	DayType     string `json:"day_type"`     // "daily", "weekday", "thai_gov"
+	LotteryName string `json:"lottery_name"`
+	OpenTime    string `json:"open_time"`  // "HH:MM"
+	CloseTime   string `json:"close_time"` // "HH:MM"
+	DayType     string `json:"day_type"`   // "daily" | "weekday" | "thai_gov"
 }
 
-// GetDefaultSchedules คืนตาราง schedule ทั้งหมดสำหรับแสดงใน admin UI
-func GetDefaultSchedules() []ScheduleInfo {
-	result := make([]ScheduleInfo, 0, len(defaultSchedules))
-	for _, s := range defaultSchedules {
-		dayType := "daily"
-		// ตรวจสอบ function pointer ไม่ได้ — ใช้ heuristic จาก code
-		if s.LotteryCode == "THAI_GOV" || s.LotteryCode == "BAAC" || s.LotteryCode == "GSB" {
-			dayType = "thai_gov"
-		} else if len(s.LotteryCode) > 5 && s.LotteryCode[:5] == "STOCK" {
-			dayType = "weekday"
+// GetDefaultSchedules คืนตาราง schedule ทั้งหมด (อ่านจาก DB)
+// ⭐ เปลี่ยนจากเดิม: อ่านจาก DB แทน hardcode
+// ถ้า DB ว่าง → คืน empty slice
+func GetDefaultSchedules(db *gorm.DB) []ScheduleInfo {
+	type row struct {
+		Code           string
+		Name           string
+		ScheduleConfig *string
+	}
+	var rows []row
+	err := db.Table("lottery_types").
+		Select("code, name, schedule_config").
+		Where("status = ? AND schedule_config IS NOT NULL", "active").
+		Order("sort_order ASC").
+		Find(&rows).Error
+	if err != nil {
+		log.Printf("⚠️  GetDefaultSchedules: %v", err)
+		return []ScheduleInfo{}
+	}
+
+	result := make([]ScheduleInfo, 0, len(rows))
+	for _, r := range rows {
+		if r.ScheduleConfig == nil {
+			continue
+		}
+		var cfg ScheduleConfig
+		if err := json.Unmarshal([]byte(*r.ScheduleConfig), &cfg); err != nil {
+			continue
 		}
 		result = append(result, ScheduleInfo{
-			LotteryCode: s.LotteryCode,
-			OpenTime:    fmt.Sprintf("%02d:%02d", s.OpenHour, s.OpenMin),
-			CloseTime:   fmt.Sprintf("%02d:%02d", s.CloseHour, s.CloseMin),
-			DayType:     dayType,
+			LotteryCode: r.Code,
+			LotteryName: r.Name,
+			OpenTime:    cfg.OpenTime,
+			CloseTime:   cfg.CloseTime,
+			DayType:     cfg.DayType,
 		})
 	}
 	return result
