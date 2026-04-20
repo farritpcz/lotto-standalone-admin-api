@@ -2399,14 +2399,7 @@ func (h *Handler) ListCommissionAdjustments(c *gin.Context) {
 //   - deduct: หักค่าคอม pending (ลดจาก wallet balance)
 //   - cancel: ยกเลิก commission เฉพาะรายการ (เปลี่ยน status เป็น cancelled)
 func (h *Handler) CreateCommissionAdjustment(c *gin.Context) {
-	// AIDEV-NOTE: admin_id จาก JWT (รองรับทั้ง int64 และ float64 จาก jwt lib)
-	adminIDAny, _ := c.Get("admin_id")
-	adminID, _ := adminIDAny.(int64)
-	if adminID == 0 {
-		if f, ok := adminIDAny.(float64); ok {
-			adminID = int64(f)
-		}
-	}
+	adminID := mw.GetAdminID(c)
 	if adminID == 0 {
 		fail(c, 401, "unauthenticated")
 		return
@@ -4164,13 +4157,7 @@ func settleYeekeeBets(db *gorm.DB, lotteryRoundID int64, rootNodeID int64, round
 
 // logManualSettle บันทึก admin action log สำหรับการออกผลยี่กี manual
 func logManualSettle(db *gorm.DB, c *gin.Context, yr model.YeekeeRound, resultNumber string, outcome string) {
-	adminID, _ := c.Get("admin_id")
-	aid, _ := adminID.(int64)
-	if aid == 0 {
-		if aidFloat, ok := adminID.(float64); ok {
-			aid = int64(aidFloat)
-		}
-	}
+	aid := mw.GetAdminID(c)
 
 	details, _ := json.Marshal(map[string]interface{}{
 		"round_no":      yr.RoundNo,

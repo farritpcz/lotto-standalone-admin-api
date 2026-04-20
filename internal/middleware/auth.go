@@ -109,11 +109,28 @@ func extractAdminToken(c *gin.Context) string {
 }
 
 // GetAdminID ดึง admin_id จาก context (helper)
+// AIDEV-NOTE: รองรับทั้ง int64 (ตอน SetAdminContext) และ float64 (จาก JWT claim ตรงๆ)
+// jwt lib decode ตัวเลขเป็น float64 เสมอ — handler ที่อ่าน claim ดิบต้องแปลง
 func GetAdminID(c *gin.Context) int64 {
-	if id, exists := c.Get("admin_id"); exists {
-		if v, ok := id.(int64); ok {
-			return v
-		}
+	v, exists := c.Get("admin_id")
+	if !exists {
+		return 0
+	}
+	if id, ok := v.(int64); ok {
+		return id
+	}
+	if idF, ok := v.(float64); ok {
+		return int64(idF)
 	}
 	return 0
+}
+
+// GetAdminIDPtr — คืน *int64 แทน int64 สำหรับ column ที่เก็บ NULL ได้
+// (nil ถ้าไม่มี admin_id หรือค่า = 0)
+func GetAdminIDPtr(c *gin.Context) *int64 {
+	id := GetAdminID(c)
+	if id <= 0 {
+		return nil
+	}
+	return &id
 }

@@ -8,14 +8,15 @@
 //   - ระบบ scope per-agent (แต่ละเว็บใต้สายตั้งระดับเอง)
 //
 // Routes:
-//   GET    /api/v1/member-levels               → list + member_count ต่อระดับ
-//   POST   /api/v1/member-levels               → สร้าง
-//   PUT    /api/v1/member-levels/:id           → แก้
-//   DELETE /api/v1/member-levels/:id           → ลบ (ต้องไม่มีสมาชิกอยู่)
-//   PUT    /api/v1/member-levels/reorder       → จัดลำดับ
-//   PUT    /api/v1/members/:id/level           → override (set + lock)
-//   DELETE /api/v1/members/:id/level-lock      → ยกเลิก lock (ให้ cron คำนวณใหม่)
-//   GET    /api/v1/members/:id/level-history   → ประวัติการเปลี่ยนระดับ
+//
+//	GET    /api/v1/member-levels               → list + member_count ต่อระดับ
+//	POST   /api/v1/member-levels               → สร้าง
+//	PUT    /api/v1/member-levels/:id           → แก้
+//	DELETE /api/v1/member-levels/:id           → ลบ (ต้องไม่มีสมาชิกอยู่)
+//	PUT    /api/v1/member-levels/reorder       → จัดลำดับ
+//	PUT    /api/v1/members/:id/level           → override (set + lock)
+//	DELETE /api/v1/members/:id/level-lock      → ยกเลิก lock (ให้ cron คำนวณใหม่)
+//	GET    /api/v1/members/:id/level-history   → ประวัติการเปลี่ยนระดับ
 //
 // ความสัมพันธ์:
 //   - DB: share กับ member-api (ตาราง member_levels, members.level_id*, member_level_history)
@@ -38,53 +39,36 @@ import (
 
 // memberLevel — โครงสร้าง `member_levels` (v3 — ตัด commission/cashback/bonus ออก)
 type memberLevel struct {
-	ID             int64     `json:"id" gorm:"primaryKey"`
-	AgentNodeID    *int64    `json:"agent_node_id" gorm:"index"`
-	Name           string    `json:"name" gorm:"size:50;not null"`
-	Color          string    `json:"color" gorm:"size:20;not null;default:#CD7F32"`
-	Icon           string    `json:"icon" gorm:"size:50"`
-	SortOrder      int       `json:"sort_order" gorm:"not null;default:0"`
-	MinDeposit30d  float64   `json:"min_deposit_30d" gorm:"column:min_deposit_30d;type:decimal(15,2);default:0"`
-	Description    string    `json:"description" gorm:"type:text"`
-	Status         string    `json:"status" gorm:"size:20;not null;default:active"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	MemberCount    int64     `json:"member_count" gorm:"-"` // computed (not stored)
+	ID            int64     `json:"id" gorm:"primaryKey"`
+	AgentNodeID   *int64    `json:"agent_node_id" gorm:"index"`
+	Name          string    `json:"name" gorm:"size:50;not null"`
+	Color         string    `json:"color" gorm:"size:20;not null;default:#CD7F32"`
+	Icon          string    `json:"icon" gorm:"size:50"`
+	SortOrder     int       `json:"sort_order" gorm:"not null;default:0"`
+	MinDeposit30d float64   `json:"min_deposit_30d" gorm:"column:min_deposit_30d;type:decimal(15,2);default:0"`
+	Description   string    `json:"description" gorm:"type:text"`
+	Status        string    `json:"status" gorm:"size:20;not null;default:active"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	MemberCount   int64     `json:"member_count" gorm:"-"` // computed (not stored)
 }
 
 func (memberLevel) TableName() string { return "member_levels" }
 
 // memberLevelHistory — `member_level_history` (audit trail)
 type memberLevelHistory struct {
-	ID                  int64     `json:"id" gorm:"primaryKey"`
-	MemberID            int64     `json:"member_id"`
-	FromLevelID         *int64    `json:"from_level_id"`
-	ToLevelID           *int64    `json:"to_level_id"`
-	Reason              string    `json:"reason"` // auto|admin_override|admin_unlock|initial
-	Deposit30dSnapshot  float64   `json:"deposit_30d_snapshot" gorm:"column:deposit_30d_snapshot"`
-	ChangedByAdminID    *int64    `json:"changed_by_admin_id"`
-	Note                string    `json:"note"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                 int64     `json:"id" gorm:"primaryKey"`
+	MemberID           int64     `json:"member_id"`
+	FromLevelID        *int64    `json:"from_level_id"`
+	ToLevelID          *int64    `json:"to_level_id"`
+	Reason             string    `json:"reason"` // auto|admin_override|admin_unlock|initial
+	Deposit30dSnapshot float64   `json:"deposit_30d_snapshot" gorm:"column:deposit_30d_snapshot"`
+	ChangedByAdminID   *int64    `json:"changed_by_admin_id"`
+	Note               string    `json:"note"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 func (memberLevelHistory) TableName() string { return "member_level_history" }
-
-// getAdminIDPtr — ดึง admin_id จาก gin context (รองรับทั้ง int64 + float64 จาก JWT)
-// คืน *int64 (nil ถ้าไม่มี — ใช้กับ column ที่เก็บ NULL ได้)
-func getAdminIDPtr(c *gin.Context) *int64 {
-	v, exists := c.Get("admin_id")
-	if !exists {
-		return nil
-	}
-	if id, ok := v.(int64); ok && id > 0 {
-		return &id
-	}
-	if idF, ok := v.(float64); ok && idF > 0 {
-		id := int64(idF)
-		return &id
-	}
-	return nil
-}
 
 // =============================================================================
 // ListMemberLevels — GET /api/v1/member-levels
@@ -332,10 +316,10 @@ func (h *Handler) OverrideMemberLevel(c *gin.Context) {
 
 	// เช็ค member อยู่ใน scope ของ admin (ป้องกันข้าม node)
 	type memRow struct {
-		ID              int64
-		LevelID         *int64
+		ID               int64
+		LevelID          *int64
 		Deposit30dCached float64 `gorm:"column:deposit_30d_cached"`
-		AgentNodeID     int64
+		AgentNodeID      int64
 	}
 	var mem memRow
 	mq := h.DB.Table("members").Where("id = ?", memberID)
@@ -357,7 +341,7 @@ func (h *Handler) OverrideMemberLevel(c *gin.Context) {
 		}
 	}
 
-	adminIDPtr := getAdminIDPtr(c)
+	adminIDPtr := mw.GetAdminIDPtr(c)
 	now := time.Now()
 
 	// transaction: update member + insert history
@@ -399,7 +383,7 @@ func (h *Handler) UnlockMemberLevel(c *gin.Context) {
 	scope := mw.GetNodeScope(c, h.DB)
 	memberID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
-	adminIDPtr := getAdminIDPtr(c)
+	adminIDPtr := mw.GetAdminIDPtr(c)
 	now := time.Now()
 
 	// เช็ค + update ใน scope
